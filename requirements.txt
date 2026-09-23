@@ -29,6 +29,8 @@ yahoo-oauth==2.1.1
 
 # Browser-backed Yahoo extraction (run: python -m playwright install chromium)
 playwright==1.57.0
+beautifulsoup4==4.13.4
+lxml==6.0.2
 stringcase==1.2.0
 
 # Testing

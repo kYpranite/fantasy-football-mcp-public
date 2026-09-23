@@ -33,7 +33,7 @@ Existing MCP handlers      src/handlers/*  → fastmcp_server.py ff_* tools
 LLM
 ```
 
-- Extraction is a **producer** run manually (`utils/sync_yahoo_league.py`, planned);
+- Extraction is a **producer** run manually (`utils/sync_yahoo_league.py`);
   the MCP reads only the local store.
 - `DATA_SOURCE=local|yahoo_api` selects the implementation behind the handlers, so the
   official API can be restored if Yahoo approves the app.
@@ -69,6 +69,9 @@ LLM
 | 2026-09-22 | Parse Yahoo's **server-rendered HTML**; passively record JSON the pages load themselves; **never call `pub-api*.fantasysports.yahoo.com` directly** | League pages carry data in HTML. The web app's `pub-api` host is the same Fantasy API that is gated for unapproved apps — calling it directly would sidestep that access control |
 | 2026-09-22 | Store Yahoo-API-style IDs (`nfl.l.<league>`, `nfl.l.<league>.t.<n>`, `nfl.p.<player>`) | Seamless switch between web and API sources |
 | 2026-09-22 | `tests/` stays gitignored; new tests/fixtures are committed with `git add -f` | Keep upstream's convention |
+| 2026-09-22 | HTML parsing with BeautifulSoup + lxml; columns located by header label, never by position | Own-team and other-team roster pages have different column layouts |
+| 2026-09-22 | Open roster slots derived from settings (`Roster Positions`) minus occupied slots, not from "(Empty)" rows | Yahoo shows empty rows only on your own team, and inconsistently |
+| 2026-09-22 | Until storage is decided, `sync_yahoo_league.py` writes a validated snapshot as JSON to `.yahoo_browser_debug/snapshots/` (debug only) | Lets us inspect real output without committing to a storage design |
 | 2026-09-22 | Storage format **undecided** — SQLite explicitly not chosen yet | To be discussed before Milestone 6 |
 
 ## Security rules
@@ -79,7 +82,7 @@ LLM
   `/data/` (local league data).
 - Debug output is scrubbed (`scrub_text`: crumb/token/session/auth/cookie values,
   emails) and URLs are redacted (`redact_url`: query values removed).
-- Committed fixtures must be trimmed and pseudonymized (team/manager names).
+- Committed fixtures must be trimmed and pseudonymized (team/manager names) — done by `tests/fixtures/yahoo_web/build_fixtures.py`, which refuses to write a fixture if a real name remains.
 - `utils/setup_yahoo_auth.py` still writes tokens to `.py.json` (now gitignored);
   exposed Yahoo client secret should be rotated before the official API is used.
 - Do not bypass Yahoo login, CAPTCHA, 2FA, or other access controls.
@@ -90,8 +93,8 @@ LLM
 |---|---|---|
 | 1 | Inspect repo, propose architecture | ✅ Done |
 | 2 | Playwright persistent session; read league name + team names | ✅ Done — commit `4048dad` |
-| 3 | League metadata, settings/scoring, teams, all current rosters, standings → normalized models (+ offline fixture tests) | ⏳ Next |
-| 4 | Current matchups, free agents/waivers (with pagination), FAAB/waiver priority | Planned |
+| 3 | League metadata, settings/scoring, teams, all current rosters, standings → normalized models (+ offline fixture tests) | ✅ Done — `utils/sync_yahoo_league.py` |
+| 4 | Current matchups, free agents/waivers (with pagination) | ⏳ Next (FAAB/waiver priority already done in 3) |
 | 5 | Transactions, historical matchups, draft results | Planned |
 | 6 | Local persistence (format TBD), snapshots/history, validation, staged commit so failed syncs never replace good data | Planned — storage decision pending |
 | 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | Planned |
@@ -114,10 +117,44 @@ LLM
 - Known bug: the logged-in user's team is labelled "My Team" (nav link text);
   Milestone 3 takes names from the standings table instead.
 
+## Milestone 3 results — core league extraction
+
+`python utils/sync_yahoo_league.py --league-id <id> [--save-pages] [--headless] [--delay 2]`
+
+13 page loads (~30 s at 2 s spacing): league home, settings, managers, one page per team.
+All-or-nothing: any parse failure or validation error aborts with nothing saved.
+
+| Page | URL | Parser | Provides |
+|---|---|---|---|
+| League home | `/f1/<id>` | `parse_league_home` | `#standingstable` (rank, W-L-T, PF, PA, streak; `tr.Selected` = your team), season (`#seasonspec`), current week (`#matchup_selectlist_nav .flyout-title`) |
+| Settings | `/f1/<id>/settings` | `parse_settings` | `#settings-table` (every label/value kept in `raw`), `#settings-stat-mod-table` (scoring rules, league vs Yahoo default) |
+| Managers | `/f1/<id>/teams` | `parse_managers` | manager display names, commissioner flag, FAAB remaining, waiver priority, moves, trades, last activity |
+| Team | `/f1/<id>/<team_id>` | `parse_team_roster` | `#statTable0..2` (offense, K, DEF): slot, player id/name, NFL team, positions, injury status, bye, points, projection, % started, % rostered, next game |
+
+Modules: `src/models/league_data.py` (models + key helpers),
+`src/extractors/yahoo_web/parsers.py` (pure HTML parsers), `extractor.py` (navigation,
+throttling, `validate_snapshot`), `utils/sync_yahoo_league.py` (CLI).
+
+Validation errors (abort): <2 teams, duplicate teams, no league name, no current week,
+not exactly one "my team", standings/team mismatch, missing or empty roster, player on
+two rosters, more players in a slot than the league allows.
+Warnings (kept on snapshot): missing manager details; settings `Max Teams` ≠ actual teams
+(this league: 12 vs 10 — validation uses the actual count).
+
+Offline tests: `tests/unit/test_yahoo_web_parsers.py` against sanitized fixtures in
+`tests/fixtures/yahoo_web/` (built by `build_fixtures.py`, which trims pages to parsed
+elements and replaces league/team/manager names with placeholders).
+
+Observations for later milestones:
+- `/f1/<id>/standings` is actually **live matchup scoring** (React markup) — use in Milestone 4.
+- Home page also has a transactions table (`.Tst-transaction-table`) — Milestone 5.
+- Some teams hold Q-status players in IR slots — possible "illegal IR" insight later.
+- Pre-existing test env gaps (not from this work): `aiohttp`, `mcp`, `pytest-asyncio`
+  not installed in the system Python, so 8 legacy test modules fail to import/run.
+
 ## Open decisions / questions
 
 - Local storage format and history model (snapshots vs. change log).
-- Whether fixtures keep real team names (repo visibility).
 - Which additional pages hold settings/scoring, rosters, FAAB, transactions, draft
   results — to be confirmed by capturing pages in Milestone 3+.
 - Yahoo ToS discourages automated access: keep syncs manual, own league only,
