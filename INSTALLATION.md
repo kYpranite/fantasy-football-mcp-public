@@ -40,6 +40,12 @@ python utils/yahoo_browser_login.py --league-id <id>
 
 If you sign in to Yahoo with Google (or see "This browser or app may not be secure"), add `--manual-login`: a normal, non-automated Chrome window opens on the same profile; log in, close it, and the script continues with the saved session.
 
+Then sync the league into the local database and point your MCP client at it (`DATA_SOURCE=local`, the default) — see the README's *Data source* section:
+
+```powershell
+python utils/sync_yahoo_league.py --league-id <id>
+```
+
 A browser window opens; log into Yahoo manually if asked. The session is kept in
 `.yahoo_browser_profile/` (gitignored) and reused on later runs. The script prints
 your league and team names and writes a sanitized discovery report to
@@ -118,7 +124,7 @@ REDDIT_CLIENT_SECRET=your_reddit_client_secret
 REDDIT_USERNAME=your_reddit_username
 ```
 
-**Note**: Since this is a private repository, the `.env` file is tracked for backup purposes.
+**Note**: Never commit `.env` — it is gitignored and holds secrets.
 
 ### 4.1 Reddit API Setup (Optional)
 

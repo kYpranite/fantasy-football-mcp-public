@@ -39,8 +39,17 @@ The main FastMCP server currently exposes:
 - `ff_get_draft_recommendation`
 - `ff_analyze_draft_state`
 - `ff_analyze_reddit_sentiment`
+- `ff_get_teams`
+- `ff_get_league_settings` — scoring rules, roster slots, waiver/FAAB, trade, playoff settings
+- `ff_get_all_rosters` — every team's roster (optional position filter)
+- `ff_get_matchups` — all matchups for a week, including past results
+- `ff_get_transactions` — adds/drops/trades with FAAB paid, filterable
+- `ff_get_faab_history` — every FAAB claim with winning and losing bids, per-manager summary
+- `ff_search_players` — who owns a player or whether they are available
+- `ff_get_player_history` — a player's roster history, transactions, and draft slot
+- `ff_get_sync_status` — freshness of the synced league data
 
-The server also contains maintenance tools used for local operation and troubleshooting.
+The newer tools (from `ff_get_league_settings` on) read synced league data (`DATA_SOURCE=local`). With `DATA_SOURCE=local`, `ff_get_draft_rankings`, `ff_get_draft_recommendation`, and `ff_analyze_draft_state` report that they need the official API, and `ff_refresh_token` is not applicable. The server also contains maintenance tools used for local operation and troubleshooting.
 
 ## Installation
 
@@ -81,11 +90,37 @@ python utils/sync_yahoo_league.py --league-id <id> --no-players          # skip 
 python utils/sync_yahoo_league.py --league-id <id> --no-history          # skip history
 ```
 
-The sync is all-or-nothing for current league state: if any of those pages fails to parse or the result fails validation, nothing is saved. History is best-effort: a failing history part is reported as a warning. Each successful sync is saved to a local SQLite database, `data/league.db` (gitignored; override with `--db` or `LEAGUE_DB_PATH`), in a single transaction, so a failed sync never replaces the previous good data. Every sync is kept as a run, so roster, standings, and FAAB changes can be compared over time; transactions, FAB bids, draft picks, and matchups are merged without duplicates. `python utils/sync_yahoo_league.py --runs` lists recent syncs, and `--json` also writes a debug JSON snapshot. Planned next: pointing the MCP tools at this database, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
+The sync is all-or-nothing for current league state: if any of those pages fails to parse or the result fails validation, nothing is saved. History is best-effort: a failing history part is reported as a warning. Each successful sync is saved to a local SQLite database, `data/league.db` (gitignored; override with `--db` or `LEAGUE_DB_PATH`), in a single transaction, so a failed sync never replaces the previous good data. Every sync is kept as a run, so roster, standings, and FAAB changes can be compared over time; transactions, FAB bids, draft picks, and matchups are merged without duplicates. `python utils/sync_yahoo_league.py --runs` lists recent syncs, and `--json` also writes a debug JSON snapshot. The MCP tools read this database by default (see [Data source](#data-source)). See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
+
+## Data source
+
+`DATA_SOURCE` selects where the MCP tools get league data:
+
+- `local` (default): the SQLite database filled by `utils/sync_yahoo_league.py`. Tools never contact Yahoo; responses include `synced_at`, and `ff_get_sync_status` says when to re-sync. No Yahoo developer credentials are needed.
+- `yahoo_api`: the official Yahoo Fantasy Sports API (requires Yahoo's approval and the credentials below).
+
+Run the MCP server with synced data (PowerShell):
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python utils\sync_yahoo_league.py --league-id <id>     # refresh data whenever you want
+.venv\Scripts\python fantasy_football_multi_league.py                  # stdio MCP server
+```
+
+Example Claude Desktop entry (adjust paths):
+
+```json
+"fantasy-football": {
+  "command": "D:\\path\\to\\fantasy-football-mcp-public\\.venv\\Scripts\\python.exe",
+  "args": ["D:\\path\\to\\fantasy-football-mcp-public\\fantasy_football_multi_league.py"],
+  "env": {"DATA_SOURCE": "local"}
+}
+```
 
 ## Authentication
 
-The server reads your Yahoo credentials from environment variables:
+Needed only for `DATA_SOURCE=yahoo_api`. The server reads your Yahoo credentials from environment variables:
 
 ```env
 YAHOO_CLIENT_ID=...
@@ -154,10 +189,11 @@ fantasy-football-mcp-public/
 │   ├── api/
 │   │   ├── yahoo_client.py
 │   │   └── yahoo_credentials.py
+│   ├── datasource/           # local (synced SQLite) data source for MCP tools
 │   ├── agents/
 │   ├── extractors/
 │   │   └── yahoo_web/        # Playwright session, page parsers, league extractor
-│   ├── handlers/
+│   ├── handlers/             # MCP tool handlers (Yahoo API + local_handlers.py)
 │   ├── models/
 │   ├── services/
 │   ├── storage/              # SQLite league store (schema, migrations, repository)

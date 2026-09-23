@@ -41,4 +41,7 @@ milestone status: [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN
   `src/storage/schema.py`; never edit an applied migration.
 - A sync is written in one transaction (`LeagueStore.save_snapshot`); a failed sync
   must never modify previously committed league data.
-- Commands are run on Windows PowerShell; use `curl.exe`, not `curl`.
+- MCP tools read data through `src/datasource/local_source.py` when `DATA_SOURCE=local`
+  (default); keep `yahoo_api` behavior in the original handlers intact.
+- Commands are run on Windows PowerShell; use `curl.exe`, not `curl`. Run tests with the
+  project virtualenv: `.venv\Scripts\python -m pytest tests`.

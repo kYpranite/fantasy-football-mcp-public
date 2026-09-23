@@ -332,9 +332,13 @@ class LocalLeagueSource:
         opponent = next(t["team_key"] for t in mine["teams"] if t["team_key"] != me)
         result["opponent"] = {"team_key": opponent, "team_name": s.team(opponent).name if s.team(opponent) else None}
         if data["week"] == s.league.current_week:
-            result["my_roster"] = self.roster(s.league.league_key, me)["starters"]
-            result["opponent_roster"] = self.roster(s.league.league_key, opponent)["starters"]
+            result["my_roster"] = self._starters(s, me)
+            result["opponent_roster"] = self._starters(s, opponent)
         return result
+
+    def _starters(self, s: LeagueSnapshot, team_key: str) -> List[Dict[str, Any]]:
+        roster = self._roster(s, team_key)
+        return [self._player(p) for p in (roster.players if roster else []) if p.slot not in ("BN", "IR")]
 
     # ------------------------------------------------------------- available players
 

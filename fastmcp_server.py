@@ -17,6 +17,7 @@ from fastmcp import Context, FastMCP
 from mcp.types import ContentBlock, TextContent
 
 import fantasy_football_multi_league
+from src.handlers.local_handlers import LOCAL_TOOL_SPECS
 
 # REMOVED: enhanced_mcp_tools imports - no longer using wrapper tools
 
@@ -27,9 +28,14 @@ _legacy_refresh_token = fantasy_football_multi_league.refresh_yahoo_token
 server = FastMCP(
     name="fantasy-football",
     instructions=(
-        "Yahoo Fantasy Football operations including league discovery, roster "
-        "analysis, waiver insights, draft tools, and Reddit sentiment checks. "
-        "Set the YAHOO_* environment variables before starting the server."
+        "Yahoo Fantasy Football co-manager tools: league discovery, settings/scoring, "
+        "standings, every team's roster, matchups, waiver wire/free agents, FAAB bid "
+        "history, transactions, draft results, lineup optimization, and Reddit sentiment. "
+        "By default (DATA_SOURCE=local) data comes from the last sync of the Yahoo league "
+        "website into a local database; responses include synced_at, and "
+        "ff_get_sync_status reports freshness. Request only what a question needs (e.g. "
+        "ff_get_roster for two teams rather than every roster). Set DATA_SOURCE=yahoo_api "
+        "(with YAHOO_* credentials) to use the official Yahoo API instead."
     ),
 )
 
@@ -106,6 +112,8 @@ _TOOL_PROMPTS: Dict[str, str] = {
         "Summarize recent Reddit sentiment and engagement around one or more "
         "players to complement scouting insights."
     ),
+    "ff_get_teams": "List every team with manager, record, FAAB, waiver priority, and roster size.",
+    **{name: spec["description"] for name, spec in LOCAL_TOOL_SPECS.items()},
 }
 
 
@@ -126,7 +134,7 @@ async def _call_legacy_tool(
     filtered_args = {key: value for key, value in arguments.items() if value is not None}
 
     if ctx is not None:
-        await ctx.info(f"Calling legacy Yahoo tool: {name}")
+        await ctx.info(f"Calling tool: {name} (data source: {fantasy_football_multi_league.DATA_SOURCE})")
 
     raw_blocks = await _legacy_call_tool(name=name, arguments=filtered_args)
     if raw_blocks is None:
@@ -264,7 +272,7 @@ async def ff_get_league_info(
 @server.tool(
     name="ff_get_roster",
     description=(
-        "⚠️ Get YOUR TEAM'S current roster (YOUR players only). "
+        "⚠️ Get a team's current roster: yours by default, or any team via team_key. "
         "DO NOT use this to search for available players! "
         "Parameters: league_key, team_key, week, data_level, include_projections, include_external_data, include_analysis. "
         "For available players use ff_get_players or ff_get_waiver_wire."
@@ -587,13 +595,135 @@ async def ff_clear_cache(
 @server.tool(
     name="ff_get_draft_results",
     description=(
-        "Fetch draft grades and pick positions for every team in a league to "
-        "review draft performance."
+        "Draft results: every pick (round, overall, team, player) and where each drafted "
+        "player is now (still on the drafting team, another team, or waivers). "
+        "Optional team_key filters to one team's picks."
     ),
     meta=_tool_meta("ff_get_draft_results"),
 )
-async def ff_get_draft_results(ctx: Context, league_key: str) -> Dict[str, Any]:
-    return await _call_legacy_tool("ff_get_draft_results", ctx=ctx, league_key=league_key)
+async def ff_get_draft_results(
+    ctx: Context, league_key: str, team_key: Optional[str] = None
+) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_get_draft_results", ctx=ctx, league_key=league_key, team_key=team_key
+    )
+
+
+@server.tool(
+    name="ff_get_teams",
+    description=(
+        "All teams in the league: manager, record, rank, points for/against, FAAB remaining, "
+        "waiver priority, moves, trades, roster size, open roster slots."
+    ),
+    meta=_tool_meta("ff_get_teams"),
+)
+async def ff_get_teams(ctx: Context, league_key: str) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_get_teams", ctx=ctx, league_key=league_key)
+
+
+@server.tool(
+    name="ff_get_league_settings",
+    description=LOCAL_TOOL_SPECS["ff_get_league_settings"]["description"],
+    meta=_tool_meta("ff_get_league_settings"),
+)
+async def ff_get_league_settings(ctx: Context, league_key: str) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_get_league_settings", ctx=ctx, league_key=league_key)
+
+
+@server.tool(
+    name="ff_get_all_rosters",
+    description=LOCAL_TOOL_SPECS["ff_get_all_rosters"]["description"],
+    meta=_tool_meta("ff_get_all_rosters"),
+)
+async def ff_get_all_rosters(
+    ctx: Context, league_key: str, position: Optional[str] = None
+) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_get_all_rosters", ctx=ctx, league_key=league_key, position=position
+    )
+
+
+@server.tool(
+    name="ff_get_matchups",
+    description=LOCAL_TOOL_SPECS["ff_get_matchups"]["description"],
+    meta=_tool_meta("ff_get_matchups"),
+)
+async def ff_get_matchups(
+    ctx: Context, league_key: str, week: Optional[int] = None
+) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_get_matchups", ctx=ctx, league_key=league_key, week=week)
+
+
+@server.tool(
+    name="ff_get_transactions",
+    description=LOCAL_TOOL_SPECS["ff_get_transactions"]["description"],
+    meta=_tool_meta("ff_get_transactions"),
+)
+async def ff_get_transactions(
+    ctx: Context,
+    league_key: str,
+    team_key: Optional[str] = None,
+    type: Optional[str] = None,
+    player: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_get_transactions",
+        ctx=ctx,
+        league_key=league_key,
+        team_key=team_key,
+        type=type,
+        player=player,
+        since=since,
+        limit=limit,
+    )
+
+
+@server.tool(
+    name="ff_get_faab_history",
+    description=LOCAL_TOOL_SPECS["ff_get_faab_history"]["description"],
+    meta=_tool_meta("ff_get_faab_history"),
+)
+async def ff_get_faab_history(
+    ctx: Context, league_key: str, team_key: Optional[str] = None
+) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_get_faab_history", ctx=ctx, league_key=league_key, team_key=team_key
+    )
+
+
+@server.tool(
+    name="ff_search_players",
+    description=LOCAL_TOOL_SPECS["ff_search_players"]["description"],
+    meta=_tool_meta("ff_search_players"),
+)
+async def ff_search_players(
+    ctx: Context, league_key: str, query: str, limit: int = 10
+) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_search_players", ctx=ctx, league_key=league_key, query=query, limit=limit
+    )
+
+
+@server.tool(
+    name="ff_get_player_history",
+    description=LOCAL_TOOL_SPECS["ff_get_player_history"]["description"],
+    meta=_tool_meta("ff_get_player_history"),
+)
+async def ff_get_player_history(ctx: Context, league_key: str, player_key: str) -> Dict[str, Any]:
+    return await _call_legacy_tool(
+        "ff_get_player_history", ctx=ctx, league_key=league_key, player_key=player_key
+    )
+
+
+@server.tool(
+    name="ff_get_sync_status",
+    description=LOCAL_TOOL_SPECS["ff_get_sync_status"]["description"],
+    meta=_tool_meta("ff_get_sync_status"),
+)
+async def ff_get_sync_status(ctx: Context, league_key: Optional[str] = None) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_get_sync_status", ctx=ctx, league_key=league_key)
 
 
 @server.tool(
@@ -1765,6 +1895,9 @@ def get_tool_selection_guide() -> str:
                 "4. COMPETITION: ff_get_matchup - Analyze weekly opponent for strategic adjustments",
                 "5. OPPORTUNITIES: ff_get_waiver_wire - Identify available upgrades",
                 "6. OPTIMIZATION: ff_build_lineup - AI-powered lineup construction",
+                "7. LEAGUE-WIDE: ff_get_all_rosters / ff_compare_teams - trade partners and positional needs",
+                "8. HISTORY: ff_get_transactions / ff_get_faab_history - manager tendencies and bid sizing",
+                "FRESHNESS: ff_get_sync_status - check synced_at before time-sensitive advice",
             ],
             "tool_categories": {
                 "CORE_LEAGUE_DATA": {

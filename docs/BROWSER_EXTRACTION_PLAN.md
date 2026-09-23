@@ -75,6 +75,7 @@ LLM
 | 2026-09-22 | Available players: status `A` (free agents + waivers), groups O/K/DEF, three views merged per player (rest-of-season proj, week proj, season total), sorted by points, depth-limited (O 100, K 25, DEF 50 per view) | Deep waiver-wire players are irrelevant; the limit is recorded per scan (`player_scans`) and surfaced as a warning so it is never mistaken for the full pool |
 | 2026-09-22 | History (past matchups, transactions, FAB offers, draft) never blocks a sync: each failing part becomes a warning; history checks are warnings, not errors | Requirement: history must not block current-state extraction |
 | 2026-09-22 | Join players on `player_key` only, never on names | Yahoo labels the same DEF "Chiefs" or "Kansas City" between page loads |
+| 2026-09-22 | MCP: `DATA_SOURCE=local` (default) swaps handlers in `call_tool` for `local_handlers`; `yahoo_api` keeps the original handlers untouched. Roster enrichment and lineup optimization are shared functions both use | Same tool names/arguments for the LLM; no duplicated Sleeper/optimizer logic |
 | 2026-09-22 | Storage: **SQLite** (`src/storage/`, `data/league.db`), chosen over DuckDB/Postgres | Stdlib, single file; one transaction per sync so failures never replace good data; WAL lets the MCP read while a sync writes. DuckDB is analytics-oriented and awkward with concurrent processes; Postgres needs a server |
 
 ## Security rules
@@ -100,8 +101,8 @@ LLM
 | 4 | Current matchups, free agents/waivers (with pagination) | ✅ Done (FAAB/waiver priority done in 3; add/drop trends deferred) |
 | 5 | Transactions, historical matchups, draft results | ✅ Done (+ FAB offers with losing bids) |
 | 6 | Local persistence, snapshots/history, validation, staged commit so failed syncs never replace good data | ✅ Done — SQLite `data/league.db` |
-| 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | ⏳ Next |
-| 8 | `DATA_SOURCE` switch; `YahooApiSource` built from existing API code | Planned |
+| 7 | Local data source wired into existing handlers/tools; new tools (league settings, all rosters, transactions, FAAB, search, sync status) | ✅ Done |
+| 8 | `DATA_SOURCE` switch; `YahooApiSource` built from existing API code | ◐ Switch done in 7 (`yahoo_api` = original handlers); API-backed sync into the same store still planned |
 
 ## Milestone 2 results — what Yahoo's league page looks like
 
@@ -234,6 +235,32 @@ Details:
 
 CLI: `sync_yahoo_league.py` saves to the DB by default; `--db PATH`, `--runs` (list syncs),
 `--json` (extra debug JSON). Tests: `tests/unit/test_league_store.py`.
+
+## Milestone 7 results — MCP tools on local data
+
+- `src/datasource/local_source.py` — `LocalLeagueSource`: JSON-ready queries over the store
+  (caches the latest run's snapshot; reloads automatically after a new sync). Accepts
+  `nfl.l.<id>`, `461.l.<id>`, or bare ids; team keys or bare team ids.
+- `src/handlers/local_handlers.py` — handlers for all 18 existing tools + 8 new ones
+  (`LOCAL_TOOL_SPECS`). Missing data returns an error with the sync command.
+- Shared with the API path: `roster_handlers.enhance_roster_result` (Sleeper projections,
+  tiers, bye weeks), `matchup_handlers.build_lineup_from_roster` (lineup optimizer),
+  `player_handlers.handle_ff_get_waiver_wire` (injected local player list).
+- `fantasy_football_multi_league.py`: `DATA_SOURCE` switch; `list_tools` includes the new
+  tools; stdio `main()` routes stray `print()` output to stderr (verified: `ff_build_lineup`
+  over stdio returns valid JSON-RPC).
+- `fastmcp_server.py`: wrappers for the new tools + `ff_get_teams`; instructions mention
+  `synced_at`/freshness and requesting only needed data.
+- Verified end to end with the FastMCP in-memory client against the real league DB.
+- Tests: `tests/unit/test_local_source.py` (+ shared `league_fixtures.py`). Full suite in
+  `.venv`: 220 passed, 5 failed — the 5 are pre-existing failures in
+  `tests/unit/test_api_client.py` (identical on the pre-Milestone-7 commit).
+
+Known limitations / follow-ups:
+- The lineup optimizer (legacy) can recommend a Doubtful player with a Yahoo projection
+  of 0 when Sleeper projects more — consider weighting injury status.
+- `ff_get_waiver_wire` "trending" sort has no add/drop trend data yet (Research view).
+- Draft-prep tools (rankings/ADP/recommendations) need the official API.
 
 ## Open decisions / questions
 

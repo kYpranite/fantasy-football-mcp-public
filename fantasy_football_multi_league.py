@@ -31,6 +31,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.absolute()
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
+from src.datasource import LOCAL, data_source_mode
+from src.handlers.local_handlers import (
+    LOCAL_ONLY_TOOLS,
+    LOCAL_TOOL_HANDLERS,
+    LOCAL_TOOL_SPECS,
+    local_waiver_wire_players,
+)
 from src.handlers import (
     handle_ff_analyze_draft_state,
     handle_ff_analyze_reddit_sentiment,
@@ -505,6 +512,14 @@ async def get_all_teams_info(league_key: str) -> list[dict]:
         return []
 
 
+def _data_source_tools() -> list[Tool]:
+    """Tools served from the local synced league store (see src/handlers/local_handlers.py)."""
+    return [
+        Tool(name=name, description=spec["description"], inputSchema=spec["input_schema"])
+        for name, spec in LOCAL_TOOL_SPECS.items()
+    ]
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available fantasy football tools."""
@@ -915,9 +930,9 @@ async def list_tools() -> list[Tool]:
                 },
             ),
         ]
-        return base_tools + draft_tools
+        return base_tools + draft_tools + _data_source_tools()
 
-    return base_tools
+    return base_tools + _data_source_tools()
 
 
 TOOL_HANDLERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
@@ -1176,10 +1191,37 @@ inject_draft_dependencies(
 )
 
 
+# Data source selection: DATA_SOURCE=local (default; synced SQLite store) or yahoo_api.
+DATA_SOURCE = data_source_mode()
+
+
+async def _requires_local_data(arguments: dict) -> dict:
+    return {
+        "status": "unavailable",
+        "data_source": DATA_SOURCE,
+        "message": "This tool reads synced league data; set DATA_SOURCE=local "
+                   "and run utils/sync_yahoo_league.py.",
+    }
+
+
+if DATA_SOURCE == LOCAL:
+    TOOL_HANDLERS.update(LOCAL_TOOL_HANDLERS)
+    # The waiver-wire handler's enrichment runs unchanged on locally synced players.
+    inject_player_dependencies(get_waiver_wire_players=local_waiver_wire_players)
+else:
+    for _tool_name in LOCAL_ONLY_TOOLS:
+        TOOL_HANDLERS[_tool_name] = _requires_local_data
+
+
 async def main():
     """Run the MCP server."""
     # Use stdio transport
     async with stdio_server() as (read_stream, write_stream):
+        # The transport already holds the real stdout; route stray print() calls from
+        # helper modules (e.g. sleeper_api) to stderr so they cannot corrupt JSON-RPC.
+        import sys
+
+        sys.stdout = sys.stderr
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
