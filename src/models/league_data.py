@@ -144,6 +144,59 @@ class TeamRoster:
 
 
 @dataclass
+class MatchupSide:
+    team_key: str
+    points: Optional[float] = None
+    projected_points: Optional[float] = None
+
+
+@dataclass
+class Matchup:
+    week: int
+    status: Optional[str]  # Yahoo's label, e.g. "Not started yet", "In progress", "Final"
+    teams: List[MatchupSide]  # two sides, in Yahoo's display order
+
+    @property
+    def team_keys(self) -> List[str]:
+        return [side.team_key for side in self.teams]
+
+
+@dataclass
+class AvailablePlayer:
+    """A player not on any fantasy roster (free agent or on waivers)."""
+
+    player_key: str
+    player_id: str
+    name: str
+    availability: str  # "free_agent" | "waivers" | raw Yahoo label if unrecognized
+    waiver_until: Optional[str] = None  # Yahoo's date label, e.g. "Sep 23"
+    nfl_team: Optional[str] = None
+    positions: List[str] = field(default_factory=list)
+    status: Optional[str] = None
+    status_full: Optional[str] = None
+    bye_week: Optional[int] = None
+    games_played: Optional[int] = None
+    percent_rostered: Optional[float] = None
+    preseason_rank: Optional[int] = None
+    current_rank: Optional[int] = None  # Yahoo "Actual" rank for the primary view
+    projected_week: Optional[float] = None  # projected points, current week
+    projected_rest_of_season: Optional[float] = None
+    season_points: Optional[float] = None
+    game: Optional[str] = None
+
+
+@dataclass
+class PlayerScan:
+    """How far one available-player list was paged, so truncation is explicit."""
+
+    position_group: str  # Yahoo pos filter: "O", "K", "DEF"
+    view: str  # Yahoo stat1 view, e.g. "S_PSR_2026"
+    pages: int
+    players: int
+    reached_end: bool  # False → stopped at the depth limit; deeper players exist
+
+
+@dataclass
 class LeagueSnapshot:
     """Core league state captured by one extraction run."""
 
@@ -154,6 +207,9 @@ class LeagueSnapshot:
     teams: List[Team]
     standings: List[Standing]
     rosters: List[TeamRoster]
+    matchups: List[Matchup] = field(default_factory=list)  # current week
+    available_players: List[AvailablePlayer] = field(default_factory=list)
+    player_scans: List[PlayerScan] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
