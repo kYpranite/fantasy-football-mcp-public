@@ -317,7 +317,8 @@ def validate_snapshot(snapshot: LeagueSnapshot) -> tuple[List[str], List[str]]:
             owner[entry.player_key] = key
         _, overfilled = open_slots(snapshot.settings.roster_positions, roster.players)
         if overfilled:
-            errors.append(f"{key}: more players in slots than the league allows: {overfilled}")
+            # Yahoo allows temporary over-limit rosters (e.g. right after a waiver claim).
+            warnings.append(f"{key}: more players in slots than the league allows: {overfilled}")
 
     if snapshot.matchups:
         in_matchups = [key for m in snapshot.matchups for key in m.team_keys]
