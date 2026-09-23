@@ -62,7 +62,7 @@ Yahoo's current access model is read-only. This project therefore treats league-
 
 While Fantasy API approval is pending, league data can be read from the normal Yahoo Fantasy website through your own logged-in browser session (Playwright). You log in manually — Yahoo handles password/2FA/passkeys — and the session is kept in a local browser profile (`.yahoo_browser_profile/`, gitignored). No Yahoo password, cookie, or token is stored in `.env` or source.
 
-Current stage is a proof of concept that confirms authenticated access:
+First confirm authenticated access (one-time login):
 
 ```powershell
 pip install -r requirements.txt
