@@ -241,6 +241,105 @@ def test_available_players_not_on_fixture_rosters(rosters):
     assert rostered.isdisjoint(listed)
 
 
+# ---------------------------------------------------------------------------- history
+
+
+@pytest.fixture(scope="module")
+def names(home):
+    return {name: f"nfl.l.269337.t.{tid}" for tid, name, _ in home.standings}
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Sep 22, 6:04 pm", "2026-09-22T18:04:00"),
+        ("Sep 16,4:44 am", "2026-09-16T04:44:00"),  # FAB page omits the space
+        ("Dec 1, 12:05 am", "2026-12-01T00:05:00"),
+        ("Jan 3, 12:30 pm", "2027-01-03T12:30:00"),  # playoffs roll into next year
+        ("yesterday", None),
+    ],
+)
+def test_parse_timestamp(raw, expected):
+    assert parsers.parse_timestamp(raw, 2026) == expected
+
+
+def test_transactions_first_page(names):
+    txs, has_next = parsers.parse_transactions(fixture("transactions_p1"), LEAGUE_ID, 2026)
+    assert has_next is True and len(txs) == 25
+    assert all(t.team_key in names.values() for t in txs)
+    assert len({t.transaction_id for t in txs}) == 25
+    latest = txs[0]
+    assert latest.type == "drop" and latest.timestamp == "2026-09-22T18:04:00"
+    (dropped,) = latest.players
+    assert (dropped.name, dropped.player_key, dropped.action, dropped.detail) == (
+        "Michael Mayer", "nfl.p.40065", "drop", "To Waivers")
+    claim = next(t for t in txs if any(p.faab_bid is not None for p in t.players))
+    add, drop = claim.players
+    assert claim.type == "add/drop"
+    assert (add.action, add.detail, add.faab_bid) == ("add", "$0 Waiver", 0)
+    assert drop.action == "drop" and drop.faab_bid is None
+
+
+def test_transactions_last_page_and_defenses():
+    txs, has_next = parsers.parse_transactions(fixture("transactions_p2"), LEAGUE_ID, 2026)
+    assert has_next is False and 0 < len(txs) < 25
+    txs += parsers.parse_transactions(fixture("transactions_p1"), LEAGUE_ID, 2026)[0]
+    defenses = [p for t in txs for p in t.players if p.positions == ["DEF"]]
+    assert defenses and all(int(p.player_id) > 100000 for p in defenses)
+    # Yahoo labels the same DEF "Chiefs" or "Kansas City" between loads: join on ids, not names.
+    chiefs = next(p for p in defenses if p.player_key == "nfl.p.100012")
+    assert chiefs.nfl_team == "KC" and chiefs.name in ("Chiefs", "Kansas City")
+
+
+def test_waiver_claims_include_losing_bids(names):
+    claims, has_next = parsers.parse_waiver_claims(fixture("transactions_faab"), LEAGUE_ID, 2026)
+    assert has_next is False and len(claims) == 4
+    vele = next(c for c in claims if c.name == "Devaughn Vele")
+    assert vele.winning_bid == 18 and vele.awarded_team_key == names["Team 5"]
+    assert [(b.bid, b.result) for b in vele.bids] == [(18, "won"), (8, "Lower Offer"), (7, "Lower Offer")]
+    assert vele.bids[1].team_key == names["Team 1"]
+    niners = next(c for c in claims if c.name == "49ers")
+    assert niners.player_key == "nfl.p.100025"  # DEF id from data-ys-playerid
+    assert niners.bids[1].result == "Lower waiver priority"
+
+
+def test_draft_results(names):
+    picks = parsers.parse_draft_results(fixture("draft"), names)
+    assert len(picks) == 150
+    assert [p.overall for p in picks] == list(range(1, 151))
+    assert all(p.team_key is not None for p in picks)
+    first = picks[0]
+    assert (first.round, first.pick, first.name, first.player_key) == (1, 1, "Jahmyr Gibbs", "nfl.p.40059")
+    assert (first.nfl_team, first.position, first.team_key) == ("DET", "RB", names["Team 11"])
+    # Each team drafts once per round.
+    for round_no in range(1, 16):
+        assert len({p.team_key for p in picks if p.round == round_no}) == 10
+    defenses = {p.name: p.player_id for p in picks if p.position == "DEF"}
+    assert len(defenses) == 10 and defenses["Patriots"] == "100017"  # mapped from team, no id in markup
+    assert len({p.player_key for p in picks}) == 150
+
+
+def test_draft_unknown_team_name_left_unmatched(names):
+    renamed = {k: v for k, v in names.items() if k != "Team 11"}
+    picks = parsers.parse_draft_results(fixture("draft"), renamed)
+    assert {p.team_name for p in picks if p.team_key is None} == {"Team 11"}
+
+
+def test_past_week_matchups_final_with_winners():
+    matchups = parsers.parse_matchups(fixture("week_1"), LEAGUE_ID)
+    assert len(matchups) == 5 and {m.week for m in matchups} == {1}
+    assert all("final" in m.status.lower() for m in matchups)
+    mine = next(m for m in matchups if "nfl.l.269337.t.4" in m.team_keys)
+    assert mine.teams[0].points == pytest.approx(142.86)
+    assert mine.winner_team_key == "nfl.l.269337.t.4"
+    assert all(m.winner_team_key in m.team_keys for m in matchups)
+
+
+def test_unfinished_matchup_has_no_winner():
+    current = parsers.parse_matchups(fixture("home"), LEAGUE_ID)
+    assert all(m.winner_team_key is None for m in current)
+
+
 # ------------------------------------------------------------------------- validation
 
 
@@ -312,3 +411,13 @@ def test_validation_flags_rostered_player_listed_available_and_depth_cap(home, s
     assert errors == []
     assert any("both rostered and available" in w and rostered.name in w for w in warnings)
     assert any("capped per view" in w and "O top 100" in w for w in warnings)
+
+
+def test_validation_history_problems_are_warnings(home, settings, managers, rosters, names):
+    snapshot = _snapshot(home, settings, managers, rosters)
+    snapshot.draft_picks = parsers.parse_draft_results(fixture("draft"), names)[:7]
+    snapshot.draft_picks[0] = replace(snapshot.draft_picks[0], team_key=None, team_name="Old Name")
+    errors, warnings = validate_snapshot(snapshot)
+    assert errors == []
+    assert any("Old Name" in w for w in warnings)
+    assert any("draft has 7 picks" in w for w in warnings)

@@ -9,12 +9,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from src.extractors.yahoo_web import parsers  # noqa: E402
 from src.extractors.yahoo_web.extractor import ExtractionError, YahooWebExtractor  # noqa: E402
 from src.extractors.yahoo_web.session import AuthRequired  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "yahoo_web"
 FIRST_PAGE = (FIXTURES / "players_O.html").read_text(encoding="utf-8")  # 25 rows, has "Next 25"
 LAST_PAGE = (FIXTURES / "players_DEF.html").read_text(encoding="utf-8")  # < 25 rows, no "Next"
+TX_FIRST = (FIXTURES / "transactions_p1.html").read_text(encoding="utf-8")  # has "Next 25"
+TX_LAST = (FIXTURES / "transactions_p2.html").read_text(encoding="utf-8")
 EMPTY_WITH_NEXT = '<table><thead><tr><th>Offense</th><th>Roster Status</th></tr></thead><tbody></tbody></table><ul class="pagingnavlist"><li><a href="?count=50">Next 25</a></li></ul>'
 
 
@@ -90,3 +93,44 @@ def test_scan_fails_when_first_page_empty():
 def test_fetch_detects_expired_login():
     with pytest.raises(AuthRequired, match="--manual-login"):
         extractor(FakePage({}, redirect_to_login=True)).fetch("home", "players?count=0")
+
+
+class RoutedPage(FakePage):
+    """Serves HTML by URL substring; unknown URLs get an empty page."""
+
+    def __init__(self, routes):
+        super().__init__({})
+        self.routes = routes
+
+    def goto(self, url, wait_until=None):
+        self.requested.append(url)
+        self.url = url
+        self._html = next((html for needle, html in self.routes if needle in url), "<html></html>")
+        return _Response()
+
+
+def test_paged_history_follows_next():
+    page = FakePage({0: TX_FIRST, 25: TX_LAST})
+    rows, capped = extractor(page)._paged(
+        "transactions", "transactions?transactionsfilter=all", parsers.parse_transactions, 2026
+    )
+    assert capped is False
+    assert len(rows) == 25 + len(parsers.parse_transactions(TX_LAST, "269337", 2026)[0])
+
+
+def test_history_failure_becomes_warning_not_error():
+    from src.models.league_data import League, LeagueSettings, LeagueSnapshot, Team
+
+    snapshot = LeagueSnapshot(
+        captured_at="x", source="yahoo_web",
+        league=League("nfl.l.269337", "269337", "Test League", 2026, 3, 2, "u"),
+        settings=LeagueSettings(raw={}), teams=[Team("nfl.l.269337.t.4", "4", "Team 4")],
+        standings=[], rosters=[],
+    )
+    # Transactions and draft pages come back without their tables; week pages too.
+    page = RoutedPage([("count=0", "<html><body>Oops</body></html>")])
+    warnings = extractor(page).extract_history(snapshot)
+    assert snapshot.transactions == [] and snapshot.draft_picks == []
+    assert any(w.startswith("transactions not collected") for w in warnings)
+    assert any(w.startswith("draft results not collected") for w in warnings)
+    assert any(w.startswith("previous weeks' matchups not collected") for w in warnings)

@@ -33,6 +33,17 @@ KEEP = {
     "managers": ["table"],
     "team": ["#statTable0", "#statTable1", "#statTable2"],
     "players": ["table.Table-interactive", ".pagingnavlist"],
+    "transactions": [".Tst-transaction-table", ".pagingnavlist"],
+    "draft": ["#yspmaincontent table"],
+    "week": ["#matchupweek"],
+}
+# fixture name → saved page name for history pages
+HISTORY_PAGES = {
+    "transactions_p1": "transactions_@0",
+    "transactions_p2": "transactions_@25",
+    "transactions_faab": "FAB_offers_@0",
+    "draft": "draft_results",
+    "week_1": "week_1_matchups",
 }
 # fixture name → saved page name (from sync --save-pages) for available-player lists
 PLAYER_PAGES = {
@@ -91,8 +102,10 @@ def main() -> int:
     sources = {"home": "home", "settings": "settings", "managers": "managers"}
     sources.update({f"team_{t}": f"team_{t}_roster" for t in args.teams})
     sources.update({name: page.format(season=args.season) for name, page in PLAYER_PAGES.items()})
+    sources.update(HISTORY_PAGES)
     for fixture, source in sources.items():
-        kind = fixture.split("_")[0] if fixture.startswith(("team_", "players_")) else fixture
+        prefixed = ("team_", "players_", "transactions_", "week_")
+        kind = fixture.split("_")[0] if fixture.startswith(prefixed) else fixture
         html = sanitize(trim(read(source), KEEP[kind]))
         leftovers = [real for real, _ in replacements if real in html]
         if leftovers:
