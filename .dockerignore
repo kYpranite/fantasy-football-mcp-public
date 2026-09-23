@@ -27,6 +27,12 @@ yahoo_tokens.json
 *.token
 oauth_state.json
 session_*.json
+.py.json
+
+# Browser session and private league data
+.yahoo_browser_profile/
+.yahoo_browser_debug/
+data/
 
 # IDE
 .vscode/
