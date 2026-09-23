@@ -257,10 +257,30 @@ CLI: `sync_yahoo_league.py` saves to the DB by default; `--db PATH`, `--runs` (l
   `tests/unit/test_api_client.py` (identical on the pre-Milestone-7 commit).
 
 Known limitations / follow-ups:
-- The lineup optimizer (legacy) can recommend a Doubtful player with a Yahoo projection
-  of 0 when Sleeper projects more — consider weighting injury status.
+- ~~Legacy lineup optimizer ignored injury status and FLEX~~ → replaced in local mode by
+  `src/analysis/lineup.py` (see below).
 - `ff_get_waiver_wire` "trending" sort has no add/drop trend data yet (Research view).
 - Draft-prep tools (rankings/ADP/recommendations) need the official API.
+
+## League-aware lineup optimizer (`src/analysis/lineup.py`)
+
+Replaces the legacy optimizer for `ff_build_lineup` when `DATA_SOURCE=local` (the legacy one
+filled one player per position, ignored FLEX, compared Yahoo projection only, and ignored
+injury status and byes).
+
+- Slots from league settings (`Roster Positions`), incl. FLEX (`W/R/T`, `Q/W/R/T`, …).
+- Expected points = Yahoo current-week projection × availability factor × (0 if on bye).
+  Availability by status and `strategy`: healthy 1.0; Q 0.7/0.85/0.95 and D 0.1/0.25/0.4
+  (conservative/balanced/aggressive); O, IR, IR-R, PUP, SUSP, NA, CEL, … = 0; unknown = 0.5
+  with a note. Table: `AVAILABILITY` / `OUT_STATUSES`.
+- Assignment: position slots first, then flex with the best remaining eligible player
+  (optimal for nested flex eligibility).
+- Output: lineup with expected points and reasons, bench, total vs current lineup, changes
+  (start/bench), warnings (0-point or risky starters, empty slots), and `waiver_upgrades` —
+  available players whose expected points beat the weakest starter at a slot by ≥ 1.
+- Works for any team (`team_key`), e.g. to size up an opponent. Sleeper projections are not
+  blended in (they ignore injury news); `ff_get_roster data_level=full` still shows them.
+- Tests: `tests/unit/test_lineup_analysis.py`.
 
 ## Open decisions / questions
 

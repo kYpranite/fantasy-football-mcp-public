@@ -49,7 +49,7 @@ The main FastMCP server currently exposes:
 - `ff_get_player_history` — a player's roster history, transactions, and draft slot
 - `ff_get_sync_status` — freshness of the synced league data
 
-The newer tools (from `ff_get_league_settings` on) read synced league data (`DATA_SOURCE=local`). With `DATA_SOURCE=local`, `ff_get_draft_rankings`, `ff_get_draft_recommendation`, and `ff_analyze_draft_state` report that they need the official API, and `ff_refresh_token` is not applicable. The server also contains maintenance tools used for local operation and troubleshooting.
+The newer tools (from `ff_get_league_settings` on) read synced league data (`DATA_SOURCE=local`). With synced data, `ff_build_lineup` fills your league's actual roster slots (including FLEX) using Yahoo projections discounted by injury status and bye weeks, lists lineup changes, and suggests waiver upgrades; `team_key` analyzes any team. With `DATA_SOURCE=local`, `ff_get_draft_rankings`, `ff_get_draft_recommendation`, and `ff_analyze_draft_state` report that they need the official API, and `ff_refresh_token` is not applicable. The server also contains maintenance tools used for local operation and troubleshooting.
 
 ## Installation
 

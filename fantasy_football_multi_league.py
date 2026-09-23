@@ -709,7 +709,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="ff_build_lineup",
-            description="Build optimal lineup from your roster using strategy-based optimization and positional constraints",
+            description=(
+                "Build the optimal start/sit lineup for this week from league roster slots (incl. FLEX), "
+                "projections, injury status, and byes; lists changes vs the current lineup and waiver "
+                "upgrades. Optional team_key analyzes another team."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -729,6 +733,14 @@ async def list_tools() -> list[Tool]:
                     "use_llm": {
                         "type": "boolean",
                         "description": "Use LLM-based optimization instead of mathematical formulas (default: false)",
+                    },
+                    "team_key": {
+                        "type": "string",
+                        "description": "Team to optimize (default: yours); local data source only",
+                    },
+                    "include_waivers": {
+                        "type": "boolean",
+                        "description": "Suggest waiver/free-agent upgrades (default: true); local data source only",
                     },
                 },
                 "required": ["league_key"],

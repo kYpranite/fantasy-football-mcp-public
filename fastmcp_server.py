@@ -507,8 +507,11 @@ async def ff_compare_teams(
 @server.tool(
     name="ff_build_lineup",
     description=(
-        "Build optimal lineup from your roster using strategy-based optimization and positional constraints. "
-        "Uses advanced analytics including matchup analysis, player projections, and situational factors."
+        "Build the optimal start/sit lineup for this week using your league's roster slots "
+        "(incl. FLEX), Yahoo projections, injury status, and bye weeks. Returns the lineup with "
+        "expected points, changes vs the current lineup, risky starters, and waiver/free-agent "
+        "upgrades that beat a starter. strategy: conservative discounts Q/D players more, "
+        "aggressive less. Optional team_key analyzes another team (e.g. your opponent)."
     ),
     meta=_tool_meta("ff_build_lineup"),
 )
@@ -517,6 +520,8 @@ async def ff_build_lineup(
     league_key: str,
     week: Optional[int] = None,
     strategy: Literal["conservative", "aggressive", "balanced"] = "balanced",
+    team_key: Optional[str] = None,
+    include_waivers: bool = True,
     debug: bool = False,
 ) -> Dict[str, Any]:
     return await _call_legacy_tool(
@@ -525,6 +530,8 @@ async def ff_build_lineup(
         league_key=league_key,
         week=week,
         strategy=strategy,
+        team_key=team_key,
+        include_waivers=include_waivers,
         debug=debug,
     )
 

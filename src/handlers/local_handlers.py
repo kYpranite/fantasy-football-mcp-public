@@ -1,8 +1,9 @@
 """MCP tool handlers backed by the local synced league store (DATA_SOURCE=local).
 
 Same tool names and arguments as the Yahoo API handlers; data comes from the SQLite
-store filled by ``utils/sync_yahoo_league.py``. Roster enrichment (Sleeper, tiers) and
-lineup optimization reuse the shared functions from the API handlers.
+store filled by ``utils/sync_yahoo_league.py``. Roster enrichment (Sleeper, tiers) and the
+waiver-wire analysis reuse the shared API-handler functions; ``ff_build_lineup`` uses the
+league-aware optimizer in ``src/analysis/lineup.py``.
 """
 
 from __future__ import annotations
@@ -10,9 +11,9 @@ from __future__ import annotations
 import functools
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from src.analysis.lineup import optimize_lineup
 from src.datasource.local_source import LocalLeagueSource, NoLocalData
 from src.handlers import player_handlers
-from src.handlers.matchup_handlers import build_lineup_from_roster
 from src.handlers.roster_handlers import enhance_roster_result, roster_detail_flags
 
 Handler = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
@@ -110,19 +111,29 @@ async def handle_ff_compare_teams(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 @_handles_missing_data
 async def handle_ff_build_lineup(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """League-aware optimizer: your league's slots, Yahoo projections, injury status, byes."""
     source = get_source()
-    league_key = source.resolve_league(arguments.get("league_key"))
-    roster = source.roster(league_key, arguments.get("team_key"))
-    week = _int(arguments.get("week"), roster.get("week"))
-    result = await build_lineup_from_roster(
-        {"roster": source.legacy_roster(league_key, roster["team_key"])},
-        league_key,
-        roster["team_key"],
-        week,
-        arguments.get("strategy", "balanced"),
-        arguments.get("use_llm", False),
+    snapshot = source.snapshot(arguments.get("league_key"))
+    team_key = source._team_key(snapshot, arguments.get("team_key"))
+    requested_week = _int(arguments.get("week"))
+    result = optimize_lineup(
+        snapshot,
+        team_key,
+        strategy=arguments.get("strategy", "balanced"),
+        include_waivers=arguments.get("include_waivers", True) is not False,
     )
-    result["synced_at"] = roster["synced_at"]
+    result.update(
+        status="success",
+        league_key=snapshot.league.league_key,
+        team_name=snapshot.team(team_key).name,
+        synced_at=snapshot.captured_at,
+        data_source="local",
+    )
+    if requested_week and requested_week != snapshot.league.current_week:
+        result["note"] = (
+            f"Projections are synced for week {snapshot.league.current_week} only; "
+            f"week {requested_week} was not optimized."
+        )
     return result
 
 
