@@ -28,10 +28,16 @@ OUT_DIR = Path(__file__).resolve().parent
 FIXTURE_LEAGUE_NAME = "Test League"
 
 KEEP = {
-    "home": ["#seasonspec", "#matchup_selectlist_nav", "#standingstable"],
+    "home": ["#seasonspec", "#matchupweek", "#standingstable"],
     "settings": ["#settings-table", "#settings-stat-mod-table"],
     "managers": ["table"],
     "team": ["#statTable0", "#statTable1", "#statTable2"],
+    "players": ["table.Table-interactive", ".pagingnavlist"],
+}
+# fixture name → saved page name (from sync --save-pages) for available-player lists
+PLAYER_PAGES = {
+    "players_O": "players_O_S_PSR_{season}_@0",
+    "players_DEF": "players_DEF_S_PSR_{season}_@0",
 }
 
 
@@ -52,6 +58,7 @@ def main() -> int:
     parser.add_argument("pages_dir", type=Path)
     parser.add_argument("--teams", nargs="+", default=["4", "9"])
     parser.add_argument("--league-id", default="269337")
+    parser.add_argument("--season", default="2026")
     args = parser.parse_args()
 
     read = lambda name: (args.pages_dir / f"{name}.html").read_text(encoding="utf-8")  # noqa: E731
@@ -83,8 +90,9 @@ def main() -> int:
 
     sources = {"home": "home", "settings": "settings", "managers": "managers"}
     sources.update({f"team_{t}": f"team_{t}_roster" for t in args.teams})
+    sources.update({name: page.format(season=args.season) for name, page in PLAYER_PAGES.items()})
     for fixture, source in sources.items():
-        kind = "team" if fixture.startswith("team_") else fixture
+        kind = fixture.split("_")[0] if fixture.startswith(("team_", "players_")) else fixture
         html = sanitize(trim(read(source), KEEP[kind]))
         leftovers = [real for real, _ in replacements if real in html]
         if leftovers:
