@@ -19,7 +19,10 @@ from urllib.parse import urlsplit
 from bs4 import BeautifulSoup, Tag
 
 from src.models.league_data import (
+    AvailablePlayer,
     LeagueSettings,
+    Matchup,
+    MatchupSide,
     PlayoffSettings,
     RosterEntry,
     ScoringRule,
@@ -394,48 +397,193 @@ def parse_team_roster(html: str, league_id: str, team_id: str, week: Optional[in
             cells = row.find_all("td")
             slot_el = row.select_one(".pos-label")
             slot = (slot_el.get("data-pos") or _text(slot_el)) if slot_el else _cell(cells, 0)
-            name_link = row.select_one("a.name[data-ys-playerid]")
+            player = _player_cell(row)
             # Rows without a player are "(Empty)" slots; Yahoo shows them inconsistently,
             # so open slots are derived from league settings instead (open_slots()).
-            if not slot or name_link is None:
+            if not slot or player is None or player.player_id in seen:
                 continue
-            player_id = name_link["data-ys-playerid"]
-            if player_id in seen:
-                continue
-            seen.add(player_id)
-            players.append(_roster_entry(row, cells, idx, key, player_id, name_link, slot))
+            seen.add(player.player_id)
+            players.append(_roster_entry(row, cells, idx, key, player, slot))
 
     return TeamRoster(team_key=key, week=week, players=players)
 
 
-def _roster_entry(
-    row: Tag, cells: List[Tag], idx: Dict[str, Optional[int]], key: str, player_id: str, name_link: Tag, slot: str
-) -> RosterEntry:
+@dataclass
+class _PlayerCell:
+    """Identity and status from Yahoo's standard player cell (rosters, player lists)."""
+
+    player_id: str
+    name: str
+    nfl_team: Optional[str]
+    positions: List[str]
+    status: Optional[str]
+    status_full: Optional[str]
+    game: Optional[str]
+
+
+def _player_cell(row: Tag) -> Optional[_PlayerCell]:
+    name_link = row.select_one("a.name[data-ys-playerid]")
+    if name_link is None:
+        return None
     nfl_team, positions = None, []
     team_pos = row.select_one(".ysf-player-name .D-b .Fz-xxs") or row.select_one(".ysf-player-name .Fz-xxs")
     match = re.match(r"\s*([A-Za-z]{2,4})\s*-\s*([A-Z/,\s]+)", _text(team_pos))
     if match:
         nfl_team = match.group(1).upper()
         positions = [p.strip() for p in match.group(2).split(",") if p.strip()]
-
     status_el = row.select_one(".ysf-player-status [title]")
-    return RosterEntry(
-        team_key=key,
-        player_key=player_key(player_id),
-        player_id=player_id,
+    return _PlayerCell(
+        player_id=name_link["data-ys-playerid"],
         name=name_link.get("title") or _text(name_link),
-        slot=slot,
         nfl_team=nfl_team,
         positions=positions,
         status=_text(status_el) or None,
         status_full=status_el.get("title") if status_el else None,
+        game=_text(row.select_one(".ysf-game-status")) or None,
+    )
+
+
+def _roster_entry(
+    row: Tag, cells: List[Tag], idx: Dict[str, Optional[int]], key: str, player: _PlayerCell, slot: str
+) -> RosterEntry:
+    return RosterEntry(
+        team_key=key,
+        player_key=player_key(player.player_id),
+        player_id=player.player_id,
+        name=player.name,
+        slot=slot,
+        nfl_team=player.nfl_team,
+        positions=player.positions,
+        status=player.status,
+        status_full=player.status_full,
         bye_week=_int(_cell(cells, idx["bye"])),
         fantasy_points=_number(_cell(cells, idx["pts"])),
         projected_points=_number(_cell(cells, idx["proj"])),
         percent_started=_number(_cell(cells, idx["start"])),
         percent_rostered=_number(_cell(cells, idx["ros"])),
-        game=_text(row.select_one(".ysf-game-status")) or None,
+        game=player.game,
     )
+
+
+# --------------------------------------------------------------------------- matchups
+
+
+def parse_matchups(html: str, league_id: str) -> List[Matchup]:
+    """Current-week matchups from the league home page's matchup module (#matchupweek)."""
+    soup = _soup(html)
+    module = soup.select_one("#matchupweek")
+    if module is None:
+        raise ParseError("League home page has no #matchupweek module")
+    section = module.select_one(".Submod.Selected") or module
+    header = _text(section.select_one(".Bg-shade") or section)
+    week_match = re.search(r"Week\s+(\d+)\s+Matchups", header)
+    if not week_match:
+        raise ParseError("Matchup module has no 'Week N Matchups' header")
+    week = int(week_match.group(1))
+    status = _text(section.select_one(".Bg-shade .Ta-end")) or None
+
+    matchups: List[Matchup] = []
+    for item in section.select("li[data-target*='/matchup?']"):
+        sides: List[MatchupSide] = []
+        for half in item.select(".Grid-u-6-13"):
+            link = next(
+                (a for a in half.select("a[href]") if _text(a) and _team_id_from_href(a["href"], league_id)),
+                None,
+            )
+            if link is None:
+                continue
+            score = half.select_one("div.Fz-lg")
+            projected = score.find_next_sibling("div") if score is not None else None
+            sides.append(
+                MatchupSide(
+                    team_key=team_key(league_id, _team_id_from_href(link["href"], league_id)),
+                    points=_number(_text(score)),
+                    projected_points=_number(_text(projected)),
+                )
+            )
+        if len(sides) != 2:
+            raise ParseError(f"Week {week} matchup row has {len(sides)} teams, expected 2")
+        matchups.append(Matchup(week=week, status=status, teams=sides))
+    if not matchups:
+        raise ParseError(f"Week {week} matchup module has no matchups")
+    return matchups
+
+
+# ------------------------------------------------------------------------ player list
+
+
+@dataclass
+class PlayerListPage:
+    rows: List[Tuple[AvailablePlayer, Optional[float]]]  # (player, value of the view's "Fan Pts")
+    has_next: bool
+
+
+def parse_player_list(html: str) -> PlayerListPage:
+    """One page (25 rows max) of the Players page (/f1/<league_id>/players?...).
+
+    The "Fan Pts" column means different things per stat view (week projection,
+    rest-of-season projection, season total), so it is returned separately.
+    """
+    soup = _soup(html)
+    table = next(
+        (t for t in soup.select("table") if _column_index(_header_labels(t), "Roster Status") is not None),
+        None,
+    )
+    if table is None:
+        raise ParseError("Players page has no player table with a Roster Status column")
+    labels = _header_labels(table)
+    i_status = _column_index(labels, "Roster Status")
+    i_gp = _column_index(labels, "GP*", "GP")
+    i_bye = _column_index(labels, "Bye")
+    i_pts = _column_index(labels, "Fan Pts")
+    i_pre = _column_index(labels, "Pre-Season")
+    i_actual = _column_index(labels, "Actual")
+    i_ros = _column_index(labels, "% Ros")
+
+    rows: List[Tuple[AvailablePlayer, Optional[float]]] = []
+    for row in table.select("tbody tr"):
+        player = _player_cell(row)
+        if player is None:
+            continue
+        cells = row.find_all("td")
+        availability, waiver_until = _availability(_cell(cells, i_status))
+        rows.append(
+            (
+                AvailablePlayer(
+                    player_key=player_key(player.player_id),
+                    player_id=player.player_id,
+                    name=player.name,
+                    availability=availability,
+                    waiver_until=waiver_until,
+                    nfl_team=player.nfl_team,
+                    positions=player.positions,
+                    status=player.status,
+                    status_full=player.status_full,
+                    bye_week=_int(_cell(cells, i_bye)),
+                    games_played=_int(_cell(cells, i_gp)),
+                    percent_rostered=_number(_cell(cells, i_ros)),
+                    preseason_rank=_int(_cell(cells, i_pre)),
+                    current_rank=_int(_cell(cells, i_actual)),
+                    game=player.game,
+                ),
+                _number(_cell(cells, i_pts)),
+            )
+        )
+
+    paging = soup.select_one(".pagingnavlist")
+    has_next = bool(paging) and any(_text(a).lower().startswith("next") for a in paging.select("a[href]"))
+    return PlayerListPage(rows=rows, has_next=has_next)
+
+
+def _availability(value: str) -> Tuple[str, Optional[str]]:
+    """'FA' → free agent; 'W (Sep 23)' → on waivers until Sep 23."""
+    value = value.strip()
+    if value.upper() == "FA":
+        return "free_agent", None
+    waiver = re.match(r"W\s*(?:\((.+)\))?$", value)
+    if waiver:
+        return "waivers", waiver.group(1)
+    return value or "unknown", None
 
 
 # ---------------------------------------------------------------------------- merging
