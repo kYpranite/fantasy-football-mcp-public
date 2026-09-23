@@ -190,9 +190,13 @@ def test_transactions_filters(source):
 def test_faab_history_summaries(source):
     result = source.faab_bids(LEAGUE_KEY)
     summary = result["by_manager"]
-    assert sum(m["claims_won"] for m in summary.values()) == 0  # fixture DB only has teams 4 and 9
-    assert len(result["claims"]) == 4
-    vele = next(c for c in result["claims"] if c["name"] == "Devaughn Vele")
+    # Spending comes from transactions ("$N Waiver" adds), including uncontested claims.
+    waiver_adds = [p for t in source.snapshot(LEAGUE_KEY).transactions
+                   if t.team_key in summary for p in t.players if p.action == "add" and p.faab_bid is not None]
+    assert sum(m["waiver_adds"] for m in summary.values()) == len(waiver_adds)
+    assert sum(m["faab_spent"] for m in summary.values()) == sum(p.faab_bid for p in waiver_adds)
+    assert len(result["contested_claims"]) == 4
+    vele = next(c for c in result["contested_claims"] if c["name"] == "Devaughn Vele")
     assert [b["bid"] for b in vele["bids"]] == [18, 8, 7]
 
 
