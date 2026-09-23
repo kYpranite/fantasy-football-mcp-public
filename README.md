@@ -58,6 +58,22 @@ Creating a Yahoo developer application is no longer sufficient by itself to use 
 
 Yahoo's current access model is read-only. This project therefore treats league-management recommendations separately from transaction execution.
 
+## Browser-backed Yahoo access (in progress)
+
+While Fantasy API approval is pending, league data can be read from the normal Yahoo Fantasy website through your own logged-in browser session (Playwright). You log in manually — Yahoo handles password/2FA/passkeys — and the session is kept in a local browser profile (`.yahoo_browser_profile/`, gitignored). No Yahoo password, cookie, or token is stored in `.env` or source.
+
+Current stage is a proof of concept that confirms authenticated access:
+
+```powershell
+pip install -r requirements.txt
+python -m playwright install chromium   # only needed if Google Chrome is not installed
+python utils/yahoo_browser_login.py --league-id <id>
+```
+
+If you sign in to Yahoo with Google (or see "This browser or app may not be secure"), add `--manual-login`: a normal, non-automated Chrome window opens on the same profile; log in, close it, and the script continues with the saved session.
+
+`<id>` is the number in your league URL (`https://football.fantasysports.yahoo.com/f1/<id>`). The script prints the league and team names and writes a sanitized discovery report (JSON endpoints, embedded page state, page HTML with token-like values redacted) to `.yahoo_browser_debug/` (gitignored). Planned next: a sync command that stores league data in a local SQLite database the MCP tools read from, with a switch back to the official API once approved.
+
 ## Authentication
 
 The server reads your Yahoo credentials from environment variables:
@@ -130,6 +146,8 @@ fantasy-football-mcp-public/
 │   │   ├── yahoo_client.py
 │   │   └── yahoo_credentials.py
 │   ├── agents/
+│   ├── extractors/
+│   │   └── yahoo_web/        # Playwright session for browser-backed Yahoo access
 │   ├── handlers/
 │   ├── models/
 │   ├── services/

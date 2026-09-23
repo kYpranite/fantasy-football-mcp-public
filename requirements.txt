@@ -26,6 +26,9 @@ prawcore==2.4.0
 textblob==0.19.0
 requests==2.32.5
 yahoo-oauth==2.1.1
+
+# Browser-backed Yahoo extraction (run: python -m playwright install chromium)
+playwright==1.57.0
 stringcase==1.2.0
 
 # Testing

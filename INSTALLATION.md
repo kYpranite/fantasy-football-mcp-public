@@ -28,6 +28,23 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### 2.1 Browser-backed access (optional, while Fantasy API approval is pending)
+
+If Yahoo has not yet approved your app for the Fantasy Sports API, you can confirm
+access through your own logged-in browser session instead (PowerShell):
+
+```powershell
+python -m playwright install chromium   # only if Google Chrome is not installed
+python utils/yahoo_browser_login.py --league-id <id>
+```
+
+If you sign in to Yahoo with Google (or see "This browser or app may not be secure"), add `--manual-login`: a normal, non-automated Chrome window opens on the same profile; log in, close it, and the script continues with the saved session.
+
+A browser window opens; log into Yahoo manually if asked. The session is kept in
+`.yahoo_browser_profile/` (gitignored) and reused on later runs. The script prints
+your league and team names and writes a sanitized discovery report to
+`.yahoo_browser_debug/` (gitignored). Never commit either directory.
+
 ## Step 3: Yahoo API Setup
 
 ### 3.1 Create a Yahoo Developer App — and apply for Fantasy Sports API access
@@ -312,6 +329,7 @@ For issues or questions:
 
 - Never share your Yahoo API credentials
 - The `.env` file contains sensitive tokens
+- `.yahoo_browser_profile/` holds your logged-in Yahoo browser session; treat it like a password
 - This repository should remain private
 - Tokens expire after 1 hour (auto-refresh available)
 - Refresh tokens last ~60 days if used regularly

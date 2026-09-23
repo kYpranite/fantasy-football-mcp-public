@@ -33,6 +33,10 @@ test_*.py
 *.swo
 *~
 
+# Local league database (private league data)
+data/*.db
+data/*.db-*
+
 # Cache and logs
 .cache/
 logs/
@@ -141,6 +145,9 @@ deployment_log.txt
 nohup.out
 
 # OAuth and session files
+.py.json
+.yahoo_browser_profile/
+.yahoo_browser_debug/
 oauth_state.json
 session_*.json
 callback_*.html
