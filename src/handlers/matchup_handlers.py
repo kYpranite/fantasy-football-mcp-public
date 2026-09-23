@@ -91,6 +91,22 @@ async def handle_ff_build_lineup(arguments: dict) -> dict:
 
     try:
         roster_data = await yahoo_api_call(f"team/{team_key}/roster")
+    except Exception as exc:
+        return {
+            "error": f"Unexpected error during lineup optimization: {exc}",
+            "league_key": league_key,
+            "team_key": team_key,
+            "suggestion": "Try again or check system logs for details",
+        }
+    return await build_lineup_from_roster(roster_data, league_key, team_key, week, strategy, use_llm)
+
+
+async def build_lineup_from_roster(roster_data, league_key, team_key, week, strategy, use_llm) -> dict:
+    """Optimize a lineup from roster data (Yahoo roster JSON or {"roster": [player dicts]}).
+
+    Shared by the Yahoo API and local data sources.
+    """
+    try:
         try:
             from lineup_optimizer import lineup_optimizer
         except ImportError as exc:

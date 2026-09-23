@@ -27,32 +27,8 @@ async def handle_ff_get_roster(arguments: dict) -> dict:
     """
     league_key = arguments.get("league_key")
     team_key = arguments.get("team_key")
-    data_level = arguments.get("data_level", "basic")
-    include_projections = arguments.get("include_projections", True)
-    include_external_data = arguments.get("include_external_data", True)
-    include_analysis = arguments.get("include_analysis", True)
     week = arguments.get("week")
-
-    if data_level == "basic":
-        effective_projections = False
-        effective_external = False
-        effective_analysis = False
-    elif data_level == "standard":
-        effective_projections = True
-        effective_external = False
-        effective_analysis = False
-    else:
-        effective_projections = True
-        effective_external = True
-        effective_analysis = True
-
-    if not include_projections:
-        effective_projections = False
-    if not include_external_data:
-        effective_external = False
-    if not include_analysis:
-        effective_analysis = False
-
+    data_level, effective_projections, effective_external, effective_analysis = roster_detail_flags(arguments)
     needs_enhanced = effective_projections or effective_external or effective_analysis
 
     team_info = None
@@ -102,6 +78,58 @@ async def handle_ff_get_roster(arguments: dict) -> dict:
     if not needs_enhanced:
         return result
 
+    return await enhance_roster_result(
+        result, roster, league_key, team_key, week, data_level,
+        effective_projections, effective_external, effective_analysis,
+    )
+
+
+def roster_detail_flags(arguments: dict):
+    """(data_level, projections, external_data, analysis) from roster tool arguments."""
+    data_level = arguments.get("data_level", "basic")
+    include_projections = arguments.get("include_projections", True)
+    include_external_data = arguments.get("include_external_data", True)
+    include_analysis = arguments.get("include_analysis", True)
+
+    if data_level == "basic":
+        effective_projections = False
+        effective_external = False
+        effective_analysis = False
+    elif data_level == "standard":
+        effective_projections = True
+        effective_external = False
+        effective_analysis = False
+    else:
+        effective_projections = True
+        effective_external = True
+        effective_analysis = True
+
+    if not include_projections:
+        effective_projections = False
+    if not include_external_data:
+        effective_external = False
+    if not include_analysis:
+        effective_analysis = False
+
+    return data_level, effective_projections, effective_external, effective_analysis
+
+
+async def enhance_roster_result(
+    result: dict,
+    roster: List[Dict[str, Any]],
+    league_key: str,
+    team_key: str,
+    week,
+    data_level: str,
+    effective_projections: bool,
+    effective_external: bool,
+    effective_analysis: bool,
+) -> dict:
+    """Add optimizer/Sleeper enrichment to a roster response.
+
+    Shared by the Yahoo API and local data sources: ``roster`` is a list of dicts with
+    name/position/team/status/bye/yahoo_projection keys.
+    """
     try:
         from lineup_optimizer import lineup_optimizer, Player
     except ImportError as exc:
