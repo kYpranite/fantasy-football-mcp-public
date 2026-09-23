@@ -93,6 +93,11 @@ def test_scrub_text_redacts_email():
     assert scrub_text('{"email":"someone.x+ff@example.co.uk"}') == '{"email":"REDACTED"}'
 
 
+def test_scrub_text_redacts_url_encoded_email():
+    scrubbed = scrub_text('<a href="https://login.yahoo.com/?as=1&login=someone%40example.com&src=sports">')
+    assert "someone" not in scrubbed and "example.com" not in scrubbed
+
+
 def test_is_fantasy_related_skips_ads():
     from utils.yahoo_browser_login import is_fantasy_related
 

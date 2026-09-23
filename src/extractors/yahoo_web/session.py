@@ -29,7 +29,8 @@ _JSON_PAIR_RE = re.compile(
     rf'("[\w.-]*{_SENSITIVE_KEY}[\w.-]*"\s*:\s*)"(?:[^"\\]|\\.)*"', re.IGNORECASE
 )
 _QUERY_PAIR_RE = re.compile(rf"([?&;][\w.-]*{_SENSITIVE_KEY}[\w.-]*=)[^&;\"'\s<>]*", re.IGNORECASE)
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Plain and URL-encoded ("%40") addresses, e.g. in Yahoo account-menu login links.
+_EMAIL_RE = re.compile(r"[\w.+-]+(?:@|%40)[\w-]+(?:\.[\w-]+)+", re.IGNORECASE)
 
 REDACTED = "REDACTED"
 
