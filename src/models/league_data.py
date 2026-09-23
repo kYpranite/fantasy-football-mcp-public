@@ -160,6 +160,16 @@ class Matchup:
     def team_keys(self) -> List[str]:
         return [side.team_key for side in self.teams]
 
+    @property
+    def winner_team_key(self) -> Optional[str]:
+        """Higher scorer once Yahoo marks the week final; None if unfinished or tied."""
+        if not self.status or "final" not in self.status.lower() or len(self.teams) != 2:
+            return None
+        a, b = self.teams
+        if a.points is None or b.points is None or a.points == b.points:
+            return None
+        return a.team_key if a.points > b.points else b.team_key
+
 
 @dataclass
 class AvailablePlayer:
@@ -197,6 +207,65 @@ class PlayerScan:
 
 
 @dataclass
+class TransactionPlayer:
+    player_key: str
+    player_id: str
+    name: str
+    action: str  # "add" | "drop" | "trade" | other Yahoo action label
+    detail: Optional[str] = None  # Yahoo's source/destination text: "Free Agent", "$18 Waiver", "To Waivers"
+    faab_bid: Optional[float] = None  # winning bid when added via FAAB waiver claim
+    nfl_team: Optional[str] = None
+    positions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class Transaction:
+    transaction_id: str  # stable hash of team, time, and players (Yahoo shows no id)
+    type: str  # "add" | "drop" | "add/drop" | "trade" | ...
+    team_key: Optional[str]  # team that made the move
+    timestamp: Optional[str]  # ISO-8601 local time (year inferred from season)
+    timestamp_raw: str  # Yahoo's label, e.g. "Sep 22, 6:04 pm"
+    players: List[TransactionPlayer]
+
+
+@dataclass
+class WaiverBid:
+    team_key: Optional[str]
+    bid: Optional[float]
+    result: str  # "won" or Yahoo's reason, e.g. "Lower Offer", "Lower waiver priority"
+
+
+@dataclass
+class WaiverClaim:
+    """A processed FAAB waiver claim, including every losing bid."""
+
+    player_key: str
+    player_id: str
+    name: str
+    awarded_team_key: Optional[str]
+    winning_bid: Optional[float]
+    timestamp: Optional[str]
+    timestamp_raw: str
+    bids: List[WaiverBid]  # winning bid first, then losing bids in Yahoo's order
+    nfl_team: Optional[str] = None
+    positions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class DraftPick:
+    round: int
+    pick: int  # pick number within the round
+    overall: int
+    team_key: Optional[str]  # None when the drafting team name no longer matches a team
+    team_name: str  # as shown on the draft results page
+    player_key: str
+    player_id: str
+    name: str
+    nfl_team: Optional[str] = None
+    position: Optional[str] = None
+
+
+@dataclass
 class LeagueSnapshot:
     """Core league state captured by one extraction run."""
 
@@ -210,6 +279,10 @@ class LeagueSnapshot:
     matchups: List[Matchup] = field(default_factory=list)  # current week
     available_players: List[AvailablePlayer] = field(default_factory=list)
     player_scans: List[PlayerScan] = field(default_factory=list)
+    matchup_history: List[Matchup] = field(default_factory=list)  # weeks before current
+    transactions: List[Transaction] = field(default_factory=list)  # newest first
+    waiver_claims: List[WaiverClaim] = field(default_factory=list)  # newest first
+    draft_picks: List[DraftPick] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
