@@ -72,7 +72,7 @@ python utils/yahoo_browser_login.py --league-id <id>
 
 If you sign in to Yahoo with Google (or see "This browser or app may not be secure"), add `--manual-login`: a normal, non-automated Chrome window opens on the same profile; log in, close it, and the script continues with the saved session.
 
-`<id>` is the number in your league URL (`https://football.fantasysports.yahoo.com/f1/<id>`). The script prints the league and team names and writes a sanitized discovery report (JSON endpoints, embedded page state, page HTML with token-like values redacted) to `.yahoo_browser_debug/` (gitignored). Planned next: a sync command that stores league data in a local SQLite database the MCP tools read from, with a switch back to the official API once approved.
+`<id>` is the number in your league URL (`https://football.fantasysports.yahoo.com/f1/<id>`). The script prints the league and team names and writes a sanitized discovery report (JSON endpoints, embedded page state, page HTML with token-like values redacted) to `.yahoo_browser_debug/` (gitignored). Planned next: a sync command that stores league data locally for the MCP tools to read, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
 
 ## Authentication
 

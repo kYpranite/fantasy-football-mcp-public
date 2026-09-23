@@ -33,9 +33,8 @@ test_*.py
 *.swo
 *~
 
-# Local league database (private league data)
-data/*.db
-data/*.db-*
+# Local league data (private)
+/data/
 
 # Cache and logs
 .cache/
