@@ -449,10 +449,8 @@ class LocalLeagueSource:
             })
         return list(known.values())
 
-    def player_details(self, league_key: Optional[str], player: str, details_client=None) -> Dict[str, Any]:
-        """League context for one player plus Sleeper game logs, usage, injury, depth chart."""
-        from src.datasource.player_details import PlayerDetailsError, SleeperPlayerDetails
-
+    def player_context(self, league_key: Optional[str], player: str) -> Dict[str, Any]:
+        """Resolve one player in the synced league data (database access only)."""
         s = self.snapshot(league_key)
         query = (player or "").strip()
         key = query if query.startswith("nfl.p.") else (f"nfl.p.{query}" if query.isdigit() else None)
@@ -469,19 +467,33 @@ class LocalLeagueSource:
                     "message": "Several players match; call again with a player_key.",
                     "matches": [{k: m.get(k) for k in ("player_key", "name", "nfl_team", "positions", "ownership",
                                                        "fantasy_team")} for m in matches[:10]]}
-        league_context = matches[0]
-        positions = league_context.get("positions") or []
-        result = {**self._meta(s), "status": "success", "player_key": league_context["player_key"],
-                  "name": league_context["name"], "league_context": league_context}
+        context = matches[0]
+        return {**self._meta(s), "status": "success", "player_key": context["player_key"],
+                "name": context["name"], "season": s.league.season, "league_context": context}
+
+    @staticmethod
+    def add_sleeper_details(result: Dict[str, Any], details_client=None) -> Dict[str, Any]:
+        """Attach Sleeper data to a ``player_context`` result (network only; no database access,
+        so it is safe to run in a worker thread)."""
+        from src.datasource.player_details import PlayerDetailsError, SleeperPlayerDetails
+
+        if result.get("status") != "success":
+            return result
+        context = result["league_context"]
+        positions = context.get("positions") or []
         client = details_client or SleeperPlayerDetails()
         try:
             result["sleeper"] = client.details(
-                league_context["player_key"].rsplit(".", 1)[-1], league_context["name"],
-                positions[0] if positions else None, league_context.get("nfl_team"), s.league.season,
+                context["player_key"].rsplit(".", 1)[-1], context["name"],
+                positions[0] if positions else None, context.get("nfl_team"), result.pop("season"),
             )
         except PlayerDetailsError as exc:
             result["sleeper_error"] = str(exc)
         return result
+
+    def player_details(self, league_key: Optional[str], player: str, details_client=None) -> Dict[str, Any]:
+        """League context for one player plus Sleeper game logs, usage, injury, depth chart."""
+        return self.add_sleeper_details(self.player_context(league_key, player), details_client)
 
     # ------------------------------------------------------------------------ history
 

@@ -266,8 +266,10 @@ async def handle_ff_get_player_details(arguments: Dict[str, Any]) -> Dict[str, A
     player = (arguments.get("player") or arguments.get("player_key") or "").strip()
     if not player:
         return {"status": "error", "error": "player is required (name or player_key)"}
-    # Sleeper calls are blocking HTTP; keep the event loop free.
-    return await asyncio.to_thread(get_source().player_details, arguments.get("league_key"), player)
+    # Database lookup stays on this thread (SQLite connections are thread-bound); only the
+    # blocking Sleeper HTTP calls run in a worker thread.
+    context = get_source().player_context(arguments.get("league_key"), player)
+    return await asyncio.to_thread(LocalLeagueSource.add_sleeper_details, context)
 
 
 async def handle_ff_sync_league(arguments: Dict[str, Any]) -> Dict[str, Any]:
