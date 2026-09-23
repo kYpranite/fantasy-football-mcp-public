@@ -8,17 +8,39 @@ Extraction is all-or-nothing: any page or validation failure raises
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.extractors.yahoo_web import parsers
 from src.extractors.yahoo_web.parsers import open_slots
 from src.extractors.yahoo_web.session import AuthRequired, is_auth_url, league_url, redact_url
-from src.models.league_data import League, LeagueSnapshot, TeamRoster, league_key
+from src.models.league_data import (
+    AvailablePlayer,
+    League,
+    LeagueSnapshot,
+    PlayerScan,
+    TeamRoster,
+    league_key,
+)
 
 
 class ExtractionError(RuntimeError):
     """Extraction failed or produced data that did not pass validation."""
+
+
+PAGE_SIZE = 25  # Yahoo player list page size
+# Yahoo "pos" filter → default number of available players to collect per view.
+DEFAULT_PLAYER_DEPTH: Dict[str, int] = {"O": 100, "K": 25, "DEF": 50}
+
+
+def player_views(season: int, week: int) -> List[Tuple[str, str]]:
+    """(AvailablePlayer field, Yahoo stat1 view). The first view sets list order."""
+    return [
+        ("projected_rest_of_season", f"S_PSR_{season}"),
+        ("projected_week", f"S_PW_{week}"),
+        ("season_points", f"S_S_{season}"),
+    ]
 
 
 class YahooWebExtractor:
@@ -64,11 +86,17 @@ class YahooWebExtractor:
         except parsers.ParseError as exc:
             raise ExtractionError(f"{name}: {exc}") from exc
 
-    def extract_core(self) -> LeagueSnapshot:
-        """League metadata, settings, teams/managers, standings, and every team's roster."""
+    def extract(self, player_depth: Optional[Dict[str, int]] = DEFAULT_PLAYER_DEPTH) -> LeagueSnapshot:
+        """Full current-state extraction.
+
+        League metadata, settings, teams/managers, standings, every roster, current-week
+        matchups, and (unless ``player_depth`` is None) available players.
+        """
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-        home = self._parse("league home", parsers.parse_league_home, self.fetch("home"), self.league_id)
+        home_html = self.fetch("home")
+        home = self._parse("league home", parsers.parse_league_home, home_html, self.league_id)
+        matchups = self._parse("matchups", parsers.parse_matchups, home_html, self.league_id)
         settings = self._parse("settings", parsers.parse_settings, self.fetch("settings", "settings"))
         managers = self._parse(
             "managers", parsers.parse_managers, self.fetch("managers", "teams"), self.league_id
@@ -108,11 +136,70 @@ class YahooWebExtractor:
             teams=teams,
             standings=[standing for _, _, standing in home.standings],
             rosters=rosters,
+            matchups=matchups,
         )
+        if player_depth and home.season and home.current_week:
+            snapshot.available_players, snapshot.player_scans = self.extract_available_players(
+                home.season, home.current_week, player_depth
+            )
         errors, snapshot.warnings = validate_snapshot(snapshot)
         if errors:
             raise ExtractionError("Snapshot failed validation:\n  - " + "\n  - ".join(errors))
         return snapshot
+
+
+    def extract_available_players(
+        self, season: int, week: int, depth: Dict[str, int]
+    ) -> Tuple[List[AvailablePlayer], List[PlayerScan]]:
+        """Page through available players (free agents + waivers) for each group and view.
+
+        Views are merged per player: the first view fixes the order, later views fill in
+        their own value (and add players that only rank highly in that view).
+        """
+        merged: Dict[str, AvailablePlayer] = {}
+        scans: List[PlayerScan] = []
+        for group, limit in depth.items():
+            for field_name, view in player_views(season, week):
+                rows, scan = self._scan_player_list(group, view, limit)
+                scans.append(scan)
+                for player, value in rows:
+                    entry = merged.get(player.player_id)
+                    if entry is None:
+                        entry = merged[player.player_id] = replace(player)
+                    setattr(entry, field_name, value)
+        return list(merged.values()), scans
+
+    def _scan_player_list(self, group: str, view: str, limit: int):
+        rows: List[tuple] = []
+        seen: set = set()
+        pages, offset, reached_end = 0, 0, False
+        while len(rows) < limit:
+            path = (
+                f"players?status=A&pos={group}&cut_type=9&stat1={view}"
+                f"&myteam=0&sort=PTS&sdir=1&count={offset}"
+            )
+            html = self.fetch(f"players {group} {view} @{offset}", path)
+            page = self._parse(f"players {group} {view} @{offset}", parsers.parse_player_list, html)
+            pages += 1
+            if not page.rows:
+                if offset == 0:
+                    raise ExtractionError(f"players {group} {view}: first page has no players")
+                if page.has_next:
+                    raise ExtractionError(f"players {group} {view}: empty page at offset {offset}")
+                reached_end = True
+                break
+            for player, value in page.rows:
+                # Lists can shift between page loads (adds/drops); skip repeats.
+                if player.player_id not in seen:
+                    seen.add(player.player_id)
+                    rows.append((player, value))
+            if not page.has_next:
+                reached_end = True
+                break
+            offset += PAGE_SIZE
+        return rows[:limit], PlayerScan(
+            position_group=group, view=view, pages=pages, players=min(len(rows), limit), reached_end=reached_end
+        )
 
 
 def validate_snapshot(snapshot: LeagueSnapshot) -> tuple[List[str], List[str]]:
@@ -158,6 +245,29 @@ def validate_snapshot(snapshot: LeagueSnapshot) -> tuple[List[str], List[str]]:
         _, overfilled = open_slots(snapshot.settings.roster_positions, roster.players)
         if overfilled:
             errors.append(f"{key}: more players in slots than the league allows: {overfilled}")
+
+    if snapshot.matchups:
+        in_matchups = [key for m in snapshot.matchups for key in m.team_keys]
+        if set(in_matchups) - known:
+            errors.append(f"matchups reference unknown teams: {sorted(set(in_matchups) - known)}")
+        if len(in_matchups) != len(set(in_matchups)):
+            errors.append("a team appears in more than one current-week matchup")
+        if {m.week for m in snapshot.matchups} != {snapshot.league.current_week}:
+            errors.append("matchup week does not match current week")
+        unmatched = known - set(in_matchups)
+        if unmatched:
+            warnings.append(f"teams without a current-week matchup (bye?): {sorted(unmatched)}")
+
+    rostered_and_available = sorted(
+        p.name for p in snapshot.available_players if p.player_key in owner
+    )
+    if rostered_and_available:
+        # A transaction during the sync can cause this; keep the data but flag it.
+        warnings.append(f"players listed as both rostered and available: {rostered_and_available}")
+    capped = sorted({f"{s.position_group} top {s.players}" for s in snapshot.player_scans if not s.reached_end})
+    if capped:
+        # Intentional depth limit (see player_scans); stated so nobody mistakes it for the full pool.
+        warnings.append(f"available players capped per view at depth limit: {', '.join(capped)}")
 
     if snapshot.settings.max_teams and snapshot.settings.max_teams != len(team_keys):
         warnings.append(

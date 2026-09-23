@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Sync league data from the Yahoo Fantasy website using the saved browser session.
 
-Extracts league metadata, settings/scoring, teams/managers, standings, and every
-team's current roster. Nothing is saved unless the whole extraction passes
+Extracts league metadata, settings/scoring, teams/managers (FAAB, waiver priority),
+standings, every team's current roster, current-week matchups, and available players
+(free agents + waivers, paged). Nothing is saved unless the whole extraction passes
 validation.
 
 Storage is not decided yet: for now a validated snapshot is written as JSON to
@@ -11,6 +12,8 @@ Storage is not decided yet: for now a validated snapshot is written as JSON to
 Usage (PowerShell):
     python utils/sync_yahoo_league.py --league-id 269337
     python utils/sync_yahoo_league.py --league-id 269337 --save-pages   # also keep scrubbed HTML
+    python utils/sync_yahoo_league.py --league-id 269337 --offense-depth 200
+    python utils/sync_yahoo_league.py --league-id 269337 --no-players   # skip available players
 """
 
 from __future__ import annotations
@@ -25,7 +28,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.extractors.yahoo_web.extractor import ExtractionError, YahooWebExtractor  # noqa: E402
+from src.extractors.yahoo_web.extractor import (  # noqa: E402
+    DEFAULT_PLAYER_DEPTH,
+    ExtractionError,
+    YahooWebExtractor,
+)
 from src.extractors.yahoo_web.session import (  # noqa: E402
     DEFAULT_DEBUG_DIR,
     AuthRequired,
@@ -50,6 +57,28 @@ def print_summary(snapshot) -> None:
             f"  {s.rank:>2}. {team.name}{mine} — {s.wins}-{s.losses}-{s.ties}, "
             f"PF {s.points_for}, FAAB {faab}, {len(rosters[team.team_key].players)} players"
         )
+
+    names = {t.team_key: t.name for t in snapshot.teams}
+    if snapshot.matchups:
+        print(f"\nWeek {snapshot.matchups[0].week} matchups ({snapshot.matchups[0].status}):")
+        for m in snapshot.matchups:
+            a, b = m.teams
+            print(
+                f"  {names[a.team_key]} {a.points} (proj {a.projected_points})"
+                f"  vs  {names[b.team_key]} {b.points} (proj {b.projected_points})"
+            )
+
+    if snapshot.available_players:
+        counts = {}
+        for p in snapshot.available_players:
+            counts[p.availability] = counts.get(p.availability, 0) + 1
+        print(f"\nAvailable players: {len(snapshot.available_players)} {counts}")
+        for position in ("QB", "RB", "WR", "TE", "K", "DEF"):
+            top = [p for p in snapshot.available_players if position in p.positions][:3]
+            if top:
+                listed = ", ".join(f"{p.name} ({p.projected_rest_of_season} ROS)" for p in top)
+                print(f"  {position}: {listed}")
+
     for warning in snapshot.warnings:
         print(f"  warning: {warning}")
 
@@ -60,6 +89,13 @@ def main() -> int:
     parser.add_argument("--headless", action="store_true", help="No browser window (fails if login is needed)")
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds between page loads (default 2)")
     parser.add_argument("--save-pages", action="store_true", help="Keep scrubbed HTML of every page fetched")
+    parser.add_argument("--no-players", action="store_true", help="Skip available players (free agents/waivers)")
+    parser.add_argument(
+        "--offense-depth",
+        type=int,
+        default=DEFAULT_PLAYER_DEPTH["O"],
+        help=f"Available offensive players to collect per view (default {DEFAULT_PLAYER_DEPTH['O']})",
+    )
     args = parser.parse_args()
     if not args.league_id:
         parser.error("--league-id is required (or set YAHOO_LEAGUE_ID)")
@@ -82,7 +118,8 @@ def main() -> int:
             extractor = YahooWebExtractor(
                 page, args.league_id, delay_s=args.delay, on_page=save_page if args.save_pages else None
             )
-            snapshot = extractor.extract_core()
+            depth = None if args.no_players else {**DEFAULT_PLAYER_DEPTH, "O": args.offense_depth}
+            snapshot = extractor.extract(player_depth=depth)
     except AuthRequired as exc:
         print(f"\nLogin required: {exc}")
         return 2

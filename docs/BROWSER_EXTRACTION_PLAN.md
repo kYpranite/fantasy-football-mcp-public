@@ -72,6 +72,7 @@ LLM
 | 2026-09-22 | HTML parsing with BeautifulSoup + lxml; columns located by header label, never by position | Own-team and other-team roster pages have different column layouts |
 | 2026-09-22 | Open roster slots derived from settings (`Roster Positions`) minus occupied slots, not from "(Empty)" rows | Yahoo shows empty rows only on your own team, and inconsistently |
 | 2026-09-22 | Until storage is decided, `sync_yahoo_league.py` writes a validated snapshot as JSON to `.yahoo_browser_debug/snapshots/` (debug only) | Lets us inspect real output without committing to a storage design |
+| 2026-09-22 | Available players: status `A` (free agents + waivers), groups O/K/DEF, three views merged per player (rest-of-season proj, week proj, season total), sorted by points, depth-limited (O 100, K 25, DEF 50 per view) | Deep waiver-wire players are irrelevant; the limit is recorded per scan (`player_scans`) and surfaced as a warning so it is never mistaken for the full pool |
 | 2026-09-22 | Storage format **undecided** — SQLite explicitly not chosen yet | To be discussed before Milestone 6 |
 
 ## Security rules
@@ -94,8 +95,8 @@ LLM
 | 1 | Inspect repo, propose architecture | ✅ Done |
 | 2 | Playwright persistent session; read league name + team names | ✅ Done — commit `4048dad` |
 | 3 | League metadata, settings/scoring, teams, all current rosters, standings → normalized models (+ offline fixture tests) | ✅ Done — `utils/sync_yahoo_league.py` |
-| 4 | Current matchups, free agents/waivers (with pagination) | ⏳ Next (FAAB/waiver priority already done in 3) |
-| 5 | Transactions, historical matchups, draft results | Planned |
+| 4 | Current matchups, free agents/waivers (with pagination) | ✅ Done (FAAB/waiver priority done in 3; add/drop trends deferred) |
+| 5 | Transactions, historical matchups, draft results | ⏳ Next |
 | 6 | Local persistence (format TBD), snapshots/history, validation, staged commit so failed syncs never replace good data | Planned — storage decision pending |
 | 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | Planned |
 | 8 | `DATA_SOURCE` switch; `YahooApiSource` built from existing API code | Planned |
@@ -151,6 +152,35 @@ Observations for later milestones:
 - Some teams hold Q-status players in IR slots — possible "illegal IR" insight later.
 - Pre-existing test env gaps (not from this work): `aiohttp`, `mcp`, `pytest-asyncio`
   not installed in the system Python, so 8 legacy test modules fail to import/run.
+
+## Milestone 4 results — matchups and available players
+
+`python utils/sync_yahoo_league.py --league-id <id> [--offense-depth 100] [--no-players]`
+
+A full sync is ~43 page loads (~2.5 min at 2 s spacing): 13 core pages + 30 player-list pages.
+
+| Data | Source | Parser | Notes |
+|---|---|---|---|
+| Current-week matchups | league home `#matchupweek` (already fetched) | `parse_matchups` | both teams, points, projected points, week status ("Not started yet"…) |
+| Available players | `/f1/<id>/players?status=A&pos={O,K,DEF}&stat1=<view>&sort=PTS&sdir=1&count=<offset>` | `parse_player_list` | 25 rows/page, "Next 25" link; free agent vs waivers + waiver clear date ("W (Sep 23)"), injury, bye, GP, % rostered, preseason/current rank; the "Fan Pts" column is the view's value |
+
+Views merged into `AvailablePlayer`: `S_PSR_<season>` → `projected_rest_of_season` (sets
+order), `S_PW_<week>` → `projected_week`, `S_S_<season>` → `season_points`.
+
+Pagination safeguards (`YahooWebExtractor._scan_player_list`): stops at the last page or
+the depth limit; repeated players across pages are dropped; an empty first page or an
+empty page that still links "Next" aborts the sync. Validation adds: matchup teams must be
+known and appear once; matchup week = current week; players both rostered and available
+are flagged (a transaction mid-sync can cause it).
+
+Offline tests: `tests/unit/test_yahoo_web_extractor.py` (pagination with a fake page,
+expired-login detection) plus matchup/player-list cases in `test_yahoo_web_parsers.py`.
+
+Deferred / found for later:
+- Add/drop trends: the Research view (`stat1=R_O`) has % rostered/% started deltas, average
+  draft pick, depth-chart role, opponent rank — sort order unclear; not collected yet.
+- Single matchup page (`/f1/<id>/matchup?week=N&mid1=A&mid2=B`) has win probability.
+- Other weeks' matchups: `?matchup_week=N&module=matchups` on league home (Milestone 5).
 
 ## Open decisions / questions
 
