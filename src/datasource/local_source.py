@@ -558,17 +558,24 @@ class LocalLeagueSource:
     # ------------------------------------------------------------------------ status
 
     def sync_status(self, league_key: Optional[str] = None) -> Dict[str, Any]:
+        from src.datasource.sync_trigger import log_tail, read_lock
+
+        running = read_lock()
+        in_progress = (
+            {"started_at_epoch": running["started_at"], "mode": running.get("mode")} if running else None
+        )
         try:
             s = self.snapshot(league_key)
         except NoLocalData as exc:
-            return {"status": "no_data", "message": str(exc), "data_source": "local"}
+            return {"status": "no_data", "message": str(exc), "data_source": "local",
+                    "sync_in_progress": in_progress}
         age_hours = None
         try:
             captured = datetime.fromisoformat(s.captured_at)
             age_hours = round((datetime.now(timezone.utc) - captured).total_seconds() / 3600, 1)
         except (TypeError, ValueError):
             pass
-        return {
+        result = {
             **self._meta(s), "status": "ok", "database": str(self.db_path),
             "age_hours": age_hours, "stale": age_hours is not None and age_hours > STALE_AFTER_HOURS,
             "current_week": s.league.current_week, "warnings": s.warnings,
@@ -577,4 +584,15 @@ class LocalLeagueSource:
                 for r in self.store.list_runs(s.league.league_key, limit=5)
             ],
             "refresh_command": f"python utils/sync_yahoo_league.py --league-id {s.league.league_id}",
+            "sync_in_progress": in_progress,
         }
+        runs = result["recent_runs"]
+        if runs and runs[0]["status"] == "failed":
+            result["last_attempt_failed"] = runs[0]["error"]
+            result["sync_log_tail"] = log_tail()
+            if "Login required" in (runs[0]["error"] or ""):
+                result["action_needed"] = (
+                    "Yahoo login expired. Run: python utils/yahoo_browser_login.py "
+                    f"--league-id {s.league.league_id} --manual-login"
+                )
+        return result

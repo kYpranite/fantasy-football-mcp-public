@@ -734,6 +734,29 @@ async def ff_get_sync_status(ctx: Context, league_key: Optional[str] = None) -> 
 
 
 @server.tool(
+    name="ff_get_player_details",
+    description=LOCAL_TOOL_SPECS["ff_get_player_details"]["description"],
+    meta=_tool_meta("ff_get_player_details"),
+)
+async def ff_get_player_details(ctx: Context, league_key: str, player: str) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_get_player_details", ctx=ctx, league_key=league_key, player=player)
+
+
+@server.tool(
+    name="ff_sync_league",
+    description=LOCAL_TOOL_SPECS["ff_sync_league"]["description"],
+    meta=_tool_meta("ff_sync_league"),
+)
+async def ff_sync_league(
+    ctx: Context,
+    league_key: str,
+    mode: Literal["quick", "full"] = "full",
+    force: bool = False,
+) -> Dict[str, Any]:
+    return await _call_legacy_tool("ff_sync_league", ctx=ctx, league_key=league_key, mode=mode, force=force)
+
+
+@server.tool(
     name="ff_get_waiver_wire",
     description=(
         "📊 Get waiver wire pickups with RANKINGS, SORTING, and expert analysis. "

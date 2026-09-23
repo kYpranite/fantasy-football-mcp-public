@@ -8,11 +8,14 @@ league-aware optimizer in ``src/analysis/lineup.py``.
 
 from __future__ import annotations
 
+import asyncio
 import functools
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from src.analysis.lineup import optimize_lineup
-from src.datasource.local_source import LocalLeagueSource, NoLocalData
+from src.datasource.local_source import LocalLeagueSource, NoLocalData, normalize_league_key
+from src.datasource.sync_trigger import start_background_sync
 from src.handlers import player_handlers
 from src.handlers.roster_handlers import enhance_roster_result, roster_detail_flags
 
@@ -258,6 +261,43 @@ async def handle_ff_get_sync_status(arguments: Dict[str, Any]) -> Dict[str, Any]
     return get_source().sync_status(arguments.get("league_key"))
 
 
+@_handles_missing_data
+async def handle_ff_get_player_details(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    player = (arguments.get("player") or arguments.get("player_key") or "").strip()
+    if not player:
+        return {"status": "error", "error": "player is required (name or player_key)"}
+    # Sleeper calls are blocking HTTP; keep the event loop free.
+    return await asyncio.to_thread(get_source().player_details, arguments.get("league_key"), player)
+
+
+async def handle_ff_sync_league(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    source = get_source()
+    league_key = normalize_league_key(arguments.get("league_key"))
+    last_synced = None
+    try:
+        snapshot = source.snapshot(league_key)
+        league_key = snapshot.league.league_key
+        last_synced = datetime.fromisoformat(snapshot.captured_at).timestamp()
+    except (NoLocalData, ValueError, TypeError):
+        pass  # first sync, or unknown freshness: allowed
+    if not league_key:
+        return {"status": "error", "error": "league_key is required for the first sync"}
+    last_attempt = None
+    try:
+        runs = source.store.list_runs(league_key, limit=1)
+        if runs:
+            last_attempt = datetime.fromisoformat(runs[0]["finished_at"]).timestamp()
+    except (NoLocalData, ValueError, TypeError):
+        pass
+    return start_background_sync(
+        league_key.rsplit(".", 1)[-1],
+        mode=arguments.get("mode") or "full",
+        force=bool(arguments.get("force")),
+        last_synced_epoch=last_synced,
+        last_attempt_epoch=last_attempt,
+    )
+
+
 LOCAL_TOOL_HANDLERS: Dict[str, Handler] = {
     "ff_get_leagues": handle_ff_get_leagues,
     "ff_get_league_info": handle_ff_get_league_info,
@@ -286,6 +326,8 @@ LOCAL_TOOL_HANDLERS: Dict[str, Handler] = {
     "ff_search_players": handle_ff_search_players,
     "ff_get_player_history": handle_ff_get_player_history,
     "ff_get_sync_status": handle_ff_get_sync_status,
+    "ff_get_player_details": handle_ff_get_player_details,
+    "ff_sync_league": handle_ff_sync_league,
 }
 
 _LEAGUE_KEY = {"type": "string", "description": "League key, e.g. 'nfl.l.269337' (from ff_get_leagues)"}
@@ -346,9 +388,30 @@ LOCAL_TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         }, "required": ["league_key", "player_key"]},
     },
     "ff_get_sync_status": {
-        "description": "When league data was last synced from Yahoo, whether it is stale, recent sync runs and "
-                       "warnings, and the command to refresh it.",
+        "description": "When league data was last synced from Yahoo, whether it is stale, whether a sync is "
+                       "running now, the last failure (with log tail), and recent sync runs.",
         "input_schema": {"type": "object", "properties": {"league_key": _LEAGUE_KEY}},
+    },
+    "ff_get_player_details": {
+        "description": "Deep dive on ONE player: league context (owner or waiver status, Yahoo injury status, "
+                       "projections) plus Sleeper data — week-by-week game log (fantasy points, snaps and snap "
+                       "share, targets, red-zone looks, carries, yards), season averages, injury body part/notes, "
+                       "depth-chart position, age. Live call to Sleeper's public API.",
+        "input_schema": {"type": "object", "properties": {
+            "league_key": _LEAGUE_KEY,
+            "player": {"type": "string", "description": "Player name or player_key (e.g. 'nfl.p.40900')"},
+        }, "required": ["league_key", "player"]},
+    },
+    "ff_sync_league": {
+        "description": "Refresh league data from Yahoo in the background (takes 1.5-3 min; a Chrome window may "
+                       "open). mode 'quick' = rosters, standings, matchups, waivers; 'full' adds transactions, "
+                       "FAB bids, draft, past weeks. Refuses if a sync is running or the last one was <10 min ago "
+                       "(force=true overrides). Check ff_get_sync_status for completion.",
+        "input_schema": {"type": "object", "properties": {
+            "league_key": _LEAGUE_KEY,
+            "mode": {"type": "string", "enum": ["quick", "full"], "default": "full"},
+            "force": {"type": "boolean", "default": False},
+        }, "required": ["league_key"]},
     },
 }
 LOCAL_ONLY_TOOLS = tuple(LOCAL_TOOL_SPECS)

@@ -282,6 +282,22 @@ injury status and byes).
   blended in (they ignore injury news); `ff_get_roster data_level=full` still shows them.
 - Tests: `tests/unit/test_lineup_analysis.py`.
 
+## Player details and model-triggered sync
+
+- `ff_get_player_details` (`src/datasource/player_details.py`): league context from the store
+  + Sleeper public API — player DB (cached 24 h in `data/cache/`) and per-player weekly stats
+  (`api.sleeper.com/stats/nfl/player/<id>`, undocumented). Matching: Sleeper `yahoo_id` (≈55%
+  coverage) → normalized name + position (+ team). Points shown are Sleeper's standard PPR, not
+  league scoring. Yahoo and Sleeper injury statuses can disagree; both are returned.
+- `ff_sync_league` (`src/datasource/sync_trigger.py`): starts `sync_yahoo_league.py` detached
+  (stdout → `data/sync.log`, never the MCP stream) and returns immediately. `data/sync.lock`
+  (token passed via `FF_SYNC_LOCK_TOKEN`; PIDs are unreliable with the venv launcher) prevents
+  overlap with manual or tool syncs; stale after 20 min. Refuses within 2 min of any attempt or
+  10 min of a successful sync unless `force`. `ff_get_sync_status` shows in-progress syncs and the
+  last failure with the log tail (and the login command if Yahoo's session expired).
+- Validation change: more players in a slot than the league allows is now a warning (Yahoo
+  permits temporary over-limit rosters after waiver claims); it previously aborted syncs.
+
 ## Open decisions / questions
 
 - Which additional pages hold settings/scoring, rosters, FAAB, transactions, draft
