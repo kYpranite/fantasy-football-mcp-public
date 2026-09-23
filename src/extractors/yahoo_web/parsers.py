@@ -10,6 +10,7 @@ of returning partial data silently. Optional fields that are absent become ``Non
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -20,6 +21,7 @@ from bs4 import BeautifulSoup, Tag
 
 from src.models.league_data import (
     AvailablePlayer,
+    DraftPick,
     LeagueSettings,
     Matchup,
     MatchupSide,
@@ -29,6 +31,10 @@ from src.models.league_data import (
     Standing,
     Team,
     TeamRoster,
+    Transaction,
+    TransactionPlayer,
+    WaiverBid,
+    WaiverClaim,
     player_key,
     team_key,
 )
@@ -570,9 +576,13 @@ def parse_player_list(html: str) -> PlayerListPage:
             )
         )
 
+    return PlayerListPage(rows=rows, has_next=_has_next_page(soup))
+
+
+def _has_next_page(soup: BeautifulSoup) -> bool:
+    """True when Yahoo's pager (.pagingnavlist) offers a "Next N" link."""
     paging = soup.select_one(".pagingnavlist")
-    has_next = bool(paging) and any(_text(a).lower().startswith("next") for a in paging.select("a[href]"))
-    return PlayerListPage(rows=rows, has_next=has_next)
+    return bool(paging) and any(_text(a).lower().startswith("next") for a in paging.select("a[href]"))
 
 
 def _availability(value: str) -> Tuple[str, Optional[str]]:
@@ -584,6 +594,250 @@ def _availability(value: str) -> Tuple[str, Optional[str]]:
     if waiver:
         return "waivers", waiver.group(1)
     return value or "unknown", None
+
+
+# ---------------------------------------------------------------------- history helpers
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1
+)}
+_TIMESTAMP_RE = re.compile(r"([A-Z][a-z]{2})\s+(\d{1,2}),\s*(\d{1,2}):(\d{2})\s*([ap]m)", re.I)
+
+
+def parse_timestamp(raw: str, season: Optional[int]) -> Optional[str]:
+    """'Sep 22, 6:04 pm' → '2026-09-22T18:04:00' (local time as Yahoo displays it).
+
+    Yahoo omits the year: Jul–Dec belong to the season year, Jan–Jun to the next year.
+    """
+    match = _TIMESTAMP_RE.search(raw or "")
+    if not match or season is None:
+        return None
+    month = _MONTHS.get(match.group(1).title())
+    if month is None:
+        return None
+    hour = int(match.group(3)) % 12 + (12 if match.group(5).lower() == "pm" else 0)
+    year = season if month >= 7 else season + 1
+    return f"{year:04d}-{month:02d}-{int(match.group(2)):02d}T{hour:02d}:{match.group(4)}:00"
+
+
+def _team_and_positions(text: str) -> Tuple[Optional[str], List[str]]:
+    """'LV - TE' or '(Det - RB)' → ('LV', ['TE'])."""
+    match = re.search(r"([A-Za-z]{2,4})\s*-\s*([A-Z/,\s]+)", text or "")
+    if not match:
+        return None, []
+    return match.group(1).upper(), [p.strip() for p in match.group(2).split(",") if p.strip()]
+
+
+def _player_id_from_href(href: str) -> Optional[str]:
+    match = re.search(r"/nfl/players/(\d+)", href or "")
+    return match.group(1) if match else None
+
+
+# Team defenses link to /nfl/teams/<slug>/ instead of a player page. Yahoo's DEF player id
+# is 100000 + Yahoo's NFL team id (verified: SF 100025, KC 100012, NE 100017, LAR 100014).
+_YAHOO_NFL_TEAM_IDS = {
+    "ATL": 1, "BUF": 2, "CHI": 3, "CIN": 4, "CLE": 5, "DAL": 6, "DEN": 7, "DET": 8, "GB": 9,
+    "TEN": 10, "IND": 11, "KC": 12, "LV": 13, "LAR": 14, "MIA": 15, "MIN": 16, "NE": 17,
+    "NO": 18, "NYG": 19, "NYJ": 20, "PHI": 21, "ARI": 22, "PIT": 23, "LAC": 24, "SF": 25,
+    "SEA": 26, "TB": 27, "WAS": 28, "CAR": 29, "JAX": 30, "BAL": 33, "HOU": 34,
+}
+_PLAYER_LINK = "a[href*='/nfl/players/'], a[href*='/nfl/teams/']"
+
+
+def _resolve_player_id(container: Tag, link: Tag, nfl_team: Optional[str], positions: List[str]) -> Optional[str]:
+    """Yahoo player id from markup (data-ys-playerid or player URL), else DEF team mapping."""
+    marked = container.select_one("[data-ys-playerid]")
+    if marked is not None:
+        return marked["data-ys-playerid"]
+    from_href = _player_id_from_href(link.get("href", ""))
+    if from_href:
+        return from_href
+    if "DEF" in positions and nfl_team in _YAHOO_NFL_TEAM_IDS:
+        return str(100000 + _YAHOO_NFL_TEAM_IDS[nfl_team])
+    return None
+
+
+def _team_key_from_links(el: Optional[Tag], league_id: str) -> Optional[str]:
+    if el is None:
+        return None
+    for a in el.select("a[href]"):
+        team_id = _team_id_from_href(a["href"], league_id)
+        if team_id:
+            return team_key(league_id, team_id)
+    return None
+
+
+def _money(text: str) -> Optional[float]:
+    match = re.search(r"\$\s*(\d+(?:\.\d+)?)", text or "")
+    return float(match.group(1)) if match else None
+
+
+# ----------------------------------------------------------------------- transactions
+
+_ICON_ACTIONS = (("add", "add"), ("drop", "drop"), ("trade", "trade"))
+
+
+def _action(icon_title: Optional[str], detail: str) -> str:
+    title = (icon_title or "").lower()
+    for needle, action in _ICON_ACTIONS:
+        if needle in title:
+            return action
+    lowered = detail.lower()
+    if lowered.startswith("to "):
+        return "drop"
+    if "free agent" in lowered or "waiver" in lowered:
+        return "add"
+    return title or "unknown"
+
+
+def parse_transactions(html: str, league_id: str, season: Optional[int]) -> Tuple[List[Transaction], bool]:
+    """One page (25 max) of /f1/<league_id>/transactions. Returns (transactions, has_next)."""
+    soup = _soup(html)
+    table = soup.select_one(".Tst-transaction-table")
+    if table is None:
+        raise ParseError("Transactions page has no .Tst-transaction-table")
+
+    transactions: List[Transaction] = []
+    for row in table.select("tr"):
+        blocks = [b for b in row.select("div.Pbot-xs") if b.select_one(_PLAYER_LINK)]
+        if not blocks:
+            continue  # e.g. "No recent transactions"
+        cells = row.find_all("td")
+        icons = [el.get("title") for el in (cells[0].select("[title]") if cells else [])]
+        players: List[TransactionPlayer] = []
+        for i, block in enumerate(blocks):
+            link = block.select_one(_PLAYER_LINK)
+            detail = _text(block.select_one("h6"))
+            nfl_team, positions = _team_and_positions(_text(block.select_one(".F-position")))
+            player_id = _resolve_player_id(block, link, nfl_team, positions)
+            if player_id is None:
+                raise ParseError(f"Transaction player without a Yahoo id: {_text(link)!r}")
+            action = _action(icons[i] if len(icons) == len(blocks) else None, detail)
+            players.append(
+                TransactionPlayer(
+                    player_key=player_key(player_id),
+                    player_id=player_id,
+                    name=_text(link),
+                    action=action,
+                    detail=detail or None,
+                    faab_bid=_money(detail) if action == "add" and "waiver" in detail.lower() else None,
+                    nfl_team=nfl_team,
+                    positions=positions,
+                )
+            )
+        team_cell = cells[-1] if cells else None
+        raw_time = _text(team_cell.select_one(".F-timestamp")) if team_cell else ""
+        acting_team = _team_key_from_links(team_cell, league_id)
+        actions = sorted({p.action for p in players})
+        kind = "add/drop" if actions == ["add", "drop"] else "/".join(actions)
+        fingerprint = "|".join([acting_team or "", raw_time] + [f"{p.action}:{p.player_id}" for p in players])
+        transactions.append(
+            Transaction(
+                transaction_id=hashlib.sha1(fingerprint.encode()).hexdigest()[:12],
+                type=kind,
+                team_key=acting_team,
+                timestamp=parse_timestamp(raw_time, season),
+                timestamp_raw=raw_time,
+                players=players,
+            )
+        )
+    return transactions, _has_next_page(soup)
+
+
+def parse_waiver_claims(html: str, league_id: str, season: Optional[int]) -> Tuple[List[WaiverClaim], bool]:
+    """One page of /f1/<league_id>/transactions?transactionsfilter=faab (FAB offers)."""
+    soup = _soup(html)
+    table = soup.select_one(".Tst-transaction-table")
+    if table is None:
+        raise ParseError("FAB offers page has no .Tst-transaction-table")
+
+    claims: List[WaiverClaim] = []
+    for row in table.select("tr"):
+        link = row.select_one(_PLAYER_LINK)
+        if link is None:
+            continue
+        cells = row.find_all("td")
+        player_cell = link.find_parent("td")
+        nfl_team, positions = _team_and_positions(_text(player_cell.select_one(".F-position")))
+        player_id = _resolve_player_id(player_cell, link, nfl_team, positions)
+        if player_id is None:
+            raise ParseError(f"FAB offer player without a Yahoo id: {_text(link)!r}")
+        awarded = _team_key_from_links(cells[-1], league_id)
+        winning_bid = _money(_text(player_cell.select_one("h6")))
+        bids = [WaiverBid(team_key=awarded, bid=winning_bid, result="won")]
+        for offer in player_cell.select("p"):
+            reason = re.search(r"\(([^)]+)\)", _text(offer))
+            bids.append(
+                WaiverBid(
+                    team_key=_team_key_from_links(offer, league_id),
+                    bid=_money(_text(offer)),
+                    result=reason.group(1) if reason else _text(offer),
+                )
+            )
+        raw_time = _text(cells[-1].select_one(".F-timestamp"))
+        claims.append(
+            WaiverClaim(
+                player_key=player_key(player_id),
+                player_id=player_id,
+                name=_text(link),
+                awarded_team_key=awarded,
+                winning_bid=winning_bid,
+                timestamp=parse_timestamp(raw_time, season),
+                timestamp_raw=raw_time,
+                bids=bids,
+                nfl_team=nfl_team,
+                positions=positions,
+            )
+        )
+    return claims, _has_next_page(soup)
+
+
+# ------------------------------------------------------------------------------ draft
+
+
+def parse_draft_results(html: str, team_keys_by_name: Dict[str, str]) -> List[DraftPick]:
+    """Draft results page (/f1/<league_id>/draftresults), one table per round.
+
+    The page names drafting teams but does not link them; ``team_keys_by_name`` maps
+    current team names to keys (unmatched → ``team_key=None``).
+    """
+    soup = _soup(html)
+    rounds: List[Tuple[int, List[Tag]]] = []
+    for table in soup.select("table"):
+        match = re.fullmatch(r"Round\s+(\d+)", _text(table.select_one("thead th")))
+        rows = [r for r in table.select("tbody tr") if r.select_one("td.player a.name")]
+        if match and rows:
+            rounds.append((int(match.group(1)), rows))
+    if not rounds:
+        raise ParseError("Draft results page has no 'Round N' tables with picks")
+
+    per_round = max(len(rows) for _, rows in rounds)
+    picks: List[DraftPick] = []
+    for round_no, rows in sorted(rounds):
+        for row in rows:
+            link = row.select_one("td.player a.name")
+            pick = _int(_text(row.select_one("td.first")).rstrip("."))
+            team_cell = row.select_one("td.last")
+            team_name = (team_cell.get("title") or _text(team_cell)) if team_cell else ""
+            nfl_team, positions = _team_and_positions(_text(row.select_one("td.player span")))
+            player_id = _resolve_player_id(row.select_one("td.player"), link, nfl_team, positions)
+            if player_id is None:
+                raise ParseError(f"Draft pick without a resolvable Yahoo id: {_text(link)!r}")
+            picks.append(
+                DraftPick(
+                    round=round_no,
+                    pick=pick or 0,
+                    overall=(round_no - 1) * per_round + (pick or 0),
+                    team_key=team_keys_by_name.get(team_name),
+                    team_name=team_name,
+                    player_key=player_key(player_id),
+                    player_id=player_id,
+                    name=_text(link),
+                    nfl_team=nfl_team,
+                    position=positions[0] if positions else None,
+                )
+            )
+    return picks
 
 
 # ---------------------------------------------------------------------------- merging
