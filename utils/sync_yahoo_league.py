@@ -3,8 +3,10 @@
 
 Extracts league metadata, settings/scoring, teams/managers (FAAB, waiver priority),
 standings, every team's current roster, current-week matchups, and available players
-(free agents + waivers, paged). Nothing is saved unless the whole extraction passes
-validation.
+(free agents + waivers, paged). Nothing is saved unless the current-state extraction
+passes validation. History (previous weeks' matchups, transactions, FAB offers with
+losing bids, draft results) is collected too; a history part that fails is reported as
+a warning and does not block the sync.
 
 Storage is not decided yet: for now a validated snapshot is written as JSON to
 .yahoo_browser_debug/snapshots/ (gitignored) for inspection.
@@ -14,6 +16,7 @@ Usage (PowerShell):
     python utils/sync_yahoo_league.py --league-id 269337 --save-pages   # also keep scrubbed HTML
     python utils/sync_yahoo_league.py --league-id 269337 --offense-depth 200
     python utils/sync_yahoo_league.py --league-id 269337 --no-players   # skip available players
+    python utils/sync_yahoo_league.py --league-id 269337 --no-history   # skip transactions/draft/past weeks
 """
 
 from __future__ import annotations
@@ -79,6 +82,18 @@ def print_summary(snapshot) -> None:
                 listed = ", ".join(f"{p.name} ({p.projected_rest_of_season} ROS)" for p in top)
                 print(f"  {position}: {listed}")
 
+    if snapshot.matchup_history or snapshot.transactions or snapshot.draft_picks:
+        weeks = sorted({m.week for m in snapshot.matchup_history})
+        print(
+            f"\nHistory: {len(snapshot.matchup_history)} past matchups (weeks {weeks}), "
+            f"{len(snapshot.transactions)} transactions, {len(snapshot.waiver_claims)} FAB claims, "
+            f"{len(snapshot.draft_picks)} draft picks"
+        )
+        for tx in snapshot.transactions[:5]:
+            moves = "; ".join(f"{p.action} {p.name}" + (f" (${p.faab_bid:g})" if p.faab_bid is not None else "")
+                              for p in tx.players)
+            print(f"  {tx.timestamp_raw} — {names.get(tx.team_key, tx.team_key)}: {moves}")
+
     for warning in snapshot.warnings:
         print(f"  warning: {warning}")
 
@@ -90,6 +105,7 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds between page loads (default 2)")
     parser.add_argument("--save-pages", action="store_true", help="Keep scrubbed HTML of every page fetched")
     parser.add_argument("--no-players", action="store_true", help="Skip available players (free agents/waivers)")
+    parser.add_argument("--no-history", action="store_true", help="Skip transactions, FAB offers, draft, past weeks")
     parser.add_argument(
         "--offense-depth",
         type=int,
@@ -119,7 +135,7 @@ def main() -> int:
                 page, args.league_id, delay_s=args.delay, on_page=save_page if args.save_pages else None
             )
             depth = None if args.no_players else {**DEFAULT_PLAYER_DEPTH, "O": args.offense_depth}
-            snapshot = extractor.extract(player_depth=depth)
+            snapshot = extractor.extract(player_depth=depth, include_history=not args.no_history)
     except AuthRequired as exc:
         print(f"\nLogin required: {exc}")
         return 2

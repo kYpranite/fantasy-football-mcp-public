@@ -72,15 +72,16 @@ python utils/yahoo_browser_login.py --league-id <id>
 
 If you sign in to Yahoo with Google (or see "This browser or app may not be secure"), add `--manual-login`: a normal, non-automated Chrome window opens on the same profile; log in, close it, and the script continues with the saved session.
 
-`<id>` is the number in your league URL (`https://football.fantasysports.yahoo.com/f1/<id>`). The script prints the league and team names and writes a sanitized discovery report (JSON endpoints, embedded page state, page HTML with token-like values redacted) to `.yahoo_browser_debug/` (gitignored). To extract the league (metadata, scoring/settings, teams, managers, FAAB, waiver priority, standings, every roster, this week's matchups, and available free agents/waiver players):
+`<id>` is the number in your league URL (`https://football.fantasysports.yahoo.com/f1/<id>`). The script prints the league and team names and writes a sanitized discovery report (JSON endpoints, embedded page state, page HTML with token-like values redacted) to `.yahoo_browser_debug/` (gitignored). To extract the league (metadata, scoring/settings, teams, managers, FAAB, waiver priority, standings, every roster, this week's matchups, available free agents/waiver players, and history — previous weeks' matchups, transactions, FAB offers including losing bids, and draft results):
 
 ```powershell
 python utils/sync_yahoo_league.py --league-id <id>
 python utils/sync_yahoo_league.py --league-id <id> --offense-depth 200   # deeper waiver wire
 python utils/sync_yahoo_league.py --league-id <id> --no-players          # skip free agents
+python utils/sync_yahoo_league.py --league-id <id> --no-history          # skip history
 ```
 
-The sync is all-or-nothing: if any page fails to parse or the result fails validation, nothing is saved. Storage is still being designed, so a validated snapshot is currently written as JSON to `.yahoo_browser_debug/snapshots/` for inspection only. Planned next: persistent local storage the MCP tools read from, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
+The sync is all-or-nothing for current league state: if any of those pages fails to parse or the result fails validation, nothing is saved. History is best-effort: a failing history part is reported as a warning. Storage is still being designed, so a validated snapshot is currently written as JSON to `.yahoo_browser_debug/snapshots/` for inspection only. Planned next: persistent local storage the MCP tools read from, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
 
 ## Authentication
 

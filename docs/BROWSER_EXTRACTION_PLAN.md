@@ -73,6 +73,8 @@ LLM
 | 2026-09-22 | Open roster slots derived from settings (`Roster Positions`) minus occupied slots, not from "(Empty)" rows | Yahoo shows empty rows only on your own team, and inconsistently |
 | 2026-09-22 | Until storage is decided, `sync_yahoo_league.py` writes a validated snapshot as JSON to `.yahoo_browser_debug/snapshots/` (debug only) | Lets us inspect real output without committing to a storage design |
 | 2026-09-22 | Available players: status `A` (free agents + waivers), groups O/K/DEF, three views merged per player (rest-of-season proj, week proj, season total), sorted by points, depth-limited (O 100, K 25, DEF 50 per view) | Deep waiver-wire players are irrelevant; the limit is recorded per scan (`player_scans`) and surfaced as a warning so it is never mistaken for the full pool |
+| 2026-09-22 | History (past matchups, transactions, FAB offers, draft) never blocks a sync: each failing part becomes a warning; history checks are warnings, not errors | Requirement: history must not block current-state extraction |
+| 2026-09-22 | Join players on `player_key` only, never on names | Yahoo labels the same DEF "Chiefs" or "Kansas City" between page loads |
 | 2026-09-22 | Storage format **undecided** — SQLite explicitly not chosen yet | To be discussed before Milestone 6 |
 
 ## Security rules
@@ -96,8 +98,8 @@ LLM
 | 2 | Playwright persistent session; read league name + team names | ✅ Done — commit `4048dad` |
 | 3 | League metadata, settings/scoring, teams, all current rosters, standings → normalized models (+ offline fixture tests) | ✅ Done — `utils/sync_yahoo_league.py` |
 | 4 | Current matchups, free agents/waivers (with pagination) | ✅ Done (FAAB/waiver priority done in 3; add/drop trends deferred) |
-| 5 | Transactions, historical matchups, draft results | ⏳ Next |
-| 6 | Local persistence (format TBD), snapshots/history, validation, staged commit so failed syncs never replace good data | Planned — storage decision pending |
+| 5 | Transactions, historical matchups, draft results | ✅ Done (+ FAB offers with losing bids) |
+| 6 | Local persistence (format TBD), snapshots/history, validation, staged commit so failed syncs never replace good data | ⏳ Next — storage decision needed first |
 | 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | Planned |
 | 8 | `DATA_SOURCE` switch; `YahooApiSource` built from existing API code | Planned |
 
@@ -181,6 +183,31 @@ Deferred / found for later:
   draft pick, depth-chart role, opponent rank — sort order unclear; not collected yet.
 - Single matchup page (`/f1/<id>/matchup?week=N&mid1=A&mid2=B`) has win probability.
 - Other weeks' matchups: `?matchup_week=N&module=matchups` on league home (Milestone 5).
+
+## Milestone 5 results — history
+
+Collected by default (`--no-history` skips it). Current full sync: ~50 page loads, ~2 min 50 s.
+
+| Data | URL | Parser | Notes |
+|---|---|---|---|
+| Past weeks' matchups | `/f1/<id>/?matchup_week=N&module=matchups&lhst=matchups` (weeks 1..current-1) | `parse_matchups` (same as current week) | "Final results"; `Matchup.winner_team_key` derived from points once final |
+| Transactions | `/f1/<id>/transactions?transactionsfilter=all&count=<offset>` (25/page, all pages) | `parse_transactions` | per player: action (add/drop/trade), Yahoo detail ("Free Agent", "$18 Waiver", "To Waivers"), FAAB bid; acting team; timestamp |
+| FAB offers | `/f1/<id>/transactions?transactionsfilter=faab&count=<offset>` | `parse_waiver_claims` | every processed claim: winning bid, awarded team, **every losing bid with team, amount, reason** ("Lower Offer", "Lower waiver priority") |
+| Draft | `/f1/<id>/draftresults` | `parse_draft_results` | 15 "Round N" tables; teams shown by name only → mapped to team keys (unmatched → `team_key=None` + warning) |
+
+Details:
+- Timestamps have no year ("Sep 22, 6:04 pm"): Jul–Dec → season year, Jan–Jun → next year.
+  Stored as local ISO time plus the raw label. Time zone is whatever Yahoo displays (EDT here).
+- Transactions have no Yahoo id; `transaction_id` is a hash of team, time, and players, and
+  duplicates across pages are dropped.
+- Team defenses link to `/nfl/teams/<slug>/`, not player pages. The id comes from
+  `data-ys-playerid` when present, otherwise 100000 + Yahoo NFL team id (table in
+  `parsers._YAHOO_NFL_TEAM_IDS`, verified against ids seen on roster/player pages).
+- Paged history lists stop at 40 pages (1,000 rows) with a warning if hit.
+- No trades yet in this league, so trade rows are parsed generically (icon title +
+  detail text) and untested against a real trade.
+- `/f1/<id>/scoreboard` does not exist (404 page).
+- Scrubbing also redacts URL-encoded emails (`%40`) found in Yahoo's account menu.
 
 ## Open decisions / questions
 

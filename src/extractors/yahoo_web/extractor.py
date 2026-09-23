@@ -29,7 +29,8 @@ class ExtractionError(RuntimeError):
     """Extraction failed or produced data that did not pass validation."""
 
 
-PAGE_SIZE = 25  # Yahoo player list page size
+PAGE_SIZE = 25  # Yahoo player list / transactions page size
+MAX_HISTORY_PAGES = 40  # safety cap per paged history list (1,000 rows)
 # Yahoo "pos" filter → default number of available players to collect per view.
 DEFAULT_PLAYER_DEPTH: Dict[str, int] = {"O": 100, "K": 25, "DEF": 50}
 
@@ -86,11 +87,16 @@ class YahooWebExtractor:
         except parsers.ParseError as exc:
             raise ExtractionError(f"{name}: {exc}") from exc
 
-    def extract(self, player_depth: Optional[Dict[str, int]] = DEFAULT_PLAYER_DEPTH) -> LeagueSnapshot:
-        """Full current-state extraction.
+    def extract(
+        self, player_depth: Optional[Dict[str, int]] = DEFAULT_PLAYER_DEPTH, include_history: bool = True
+    ) -> LeagueSnapshot:
+        """Full extraction.
 
-        League metadata, settings, teams/managers, standings, every roster, current-week
-        matchups, and (unless ``player_depth`` is None) available players.
+        Current state (must all succeed): league metadata, settings, teams/managers,
+        standings, every roster, current-week matchups, and (unless ``player_depth`` is
+        None) available players. History (``include_history``): previous weeks' matchups,
+        transactions, FAB offers, draft results — each part that fails becomes a warning
+        instead of failing the sync.
         """
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -142,7 +148,11 @@ class YahooWebExtractor:
             snapshot.available_players, snapshot.player_scans = self.extract_available_players(
                 home.season, home.current_week, player_depth
             )
+        history_warnings: List[str] = []
+        if include_history and home.season and home.current_week:
+            history_warnings = self.extract_history(snapshot)
         errors, snapshot.warnings = validate_snapshot(snapshot)
+        snapshot.warnings = history_warnings + snapshot.warnings
         if errors:
             raise ExtractionError("Snapshot failed validation:\n  - " + "\n  - ".join(errors))
         return snapshot
@@ -168,6 +178,69 @@ class YahooWebExtractor:
                         entry = merged[player.player_id] = replace(player)
                     setattr(entry, field_name, value)
         return list(merged.values()), scans
+
+    def extract_history(self, snapshot: LeagueSnapshot) -> List[str]:
+        """Fill history fields on ``snapshot``; return warnings for parts that failed."""
+        season, week = snapshot.league.season, snapshot.league.current_week
+        warnings: List[str] = []
+
+        def attempt(label: str, action: Callable[[], None]) -> None:
+            try:
+                action()
+            except (ExtractionError, parsers.ParseError) as exc:
+                warnings.append(f"{label} not collected: {exc}")
+
+        def past_matchups() -> None:
+            history = []
+            for past in range(1, week):
+                name = f"week {past} matchups"
+                html = self.fetch(name, f"?matchup_week={past}&module=matchups&lhst=matchups")
+                matchups = self._parse(name, parsers.parse_matchups, html, self.league_id)
+                if {m.week for m in matchups} != {past}:
+                    raise ExtractionError(f"{name}: page showed week {sorted({m.week for m in matchups})}")
+                history.extend(matchups)
+            snapshot.matchup_history = history
+
+        def transactions() -> None:
+            rows, capped = self._paged("transactions", "transactions?transactionsfilter=all",
+                                       parsers.parse_transactions, season)
+            unique = {t.transaction_id: t for t in rows}
+            snapshot.transactions = list(unique.values())
+            if capped:
+                warnings.append(f"transactions capped at {MAX_HISTORY_PAGES} pages; older ones not collected")
+
+        def waiver_claims() -> None:
+            rows, capped = self._paged("FAB offers", "transactions?transactionsfilter=faab",
+                                       parsers.parse_waiver_claims, season)
+            snapshot.waiver_claims = rows
+            if capped:
+                warnings.append(f"FAB offers capped at {MAX_HISTORY_PAGES} pages; older ones not collected")
+
+        def draft() -> None:
+            names = {t.name: t.team_key for t in snapshot.teams}
+            html = self.fetch("draft results", "draftresults")
+            snapshot.draft_picks = self._parse("draft results", parsers.parse_draft_results, html, names)
+
+        attempt("previous weeks' matchups", past_matchups)
+        attempt("transactions", transactions)
+        attempt("FAB offers", waiver_claims)
+        attempt("draft results", draft)
+        return warnings
+
+    def _paged(self, name: str, path: str, parse: Callable, season: Optional[int]) -> Tuple[list, bool]:
+        """Follow Yahoo's "Next 25" pager; returns (rows, hit_page_cap)."""
+        rows: list = []
+        for page_no in range(MAX_HISTORY_PAGES):
+            offset = page_no * PAGE_SIZE
+            label = f"{name} @{offset}"
+            html = self.fetch(label, f"{path}&count={offset}")
+            page_rows, has_next = self._parse(label, parse, html, self.league_id, season)
+            rows.extend(page_rows)
+            if not has_next:
+                return rows, False
+            if not page_rows:
+                raise ExtractionError(f"{label}: empty page that still links to a next page")
+        return rows, True
 
     def _scan_player_list(self, group: str, view: str, limit: int):
         rows: List[tuple] = []
@@ -268,6 +341,26 @@ def validate_snapshot(snapshot: LeagueSnapshot) -> tuple[List[str], List[str]]:
     if capped:
         # Intentional depth limit (see player_scans); stated so nobody mistakes it for the full pool.
         warnings.append(f"available players capped per view at depth limit: {', '.join(capped)}")
+
+    # History checks are warnings only: history never blocks current-state data.
+    per_week: Dict[int, int] = {}
+    for m in snapshot.matchup_history:
+        per_week[m.week] = per_week.get(m.week, 0) + 1
+        if set(m.team_keys) - known:
+            warnings.append(f"week {m.week} matchup has unknown teams: {sorted(set(m.team_keys) - known)}")
+    for week_no, count in sorted(per_week.items()):
+        if count != len(known) // 2:
+            warnings.append(f"week {week_no}: {count} matchups, expected {len(known) // 2}")
+    tx_teams = {t.team_key for t in snapshot.transactions} | {c.awarded_team_key for c in snapshot.waiver_claims}
+    if tx_teams - known - {None}:
+        warnings.append(f"transactions reference unknown teams: {sorted(tx_teams - known - {None})}")
+    if snapshot.draft_picks:
+        unmatched = sorted({p.team_name for p in snapshot.draft_picks if p.team_key is None})
+        if unmatched:
+            warnings.append(f"draft picks by unknown team names (renamed?): {unmatched}")
+        rounds = max(p.round for p in snapshot.draft_picks)
+        if len(snapshot.draft_picks) != rounds * len(known):
+            warnings.append(f"draft has {len(snapshot.draft_picks)} picks, expected {rounds} x {len(known)}")
 
     if snapshot.settings.max_teams and snapshot.settings.max_teams != len(team_keys):
         warnings.append(
