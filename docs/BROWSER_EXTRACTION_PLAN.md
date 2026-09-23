@@ -33,8 +33,8 @@ Existing MCP handlers      src/handlers/*  → fastmcp_server.py ff_* tools
 LLM
 ```
 
-- Extraction is a **producer** run manually (`utils/sync_yahoo_league.py`);
-  the MCP reads only the local store.
+- Extraction is a **producer** run manually (`utils/sync_yahoo_league.py`) that writes to
+  SQLite; the MCP reads only the local store.
 - `DATA_SOURCE=local|yahoo_api` selects the implementation behind the handlers, so the
   official API can be restored if Yahoo approves the app.
 - Yahoo page structure is isolated in the extractor; MCP tools never see selectors.
@@ -82,7 +82,7 @@ LLM
 - Never store Yahoo password, cookies, OAuth tokens, or Authorization headers in code,
   `.env`, fixtures, or logs. Never expose them to the LLM.
 - Gitignored: `.env*`, `.py.json`, `.yahoo_browser_profile/`, `.yahoo_browser_debug/`,
-  `/data/` (local league data).
+  `/data/` (local league data, incl. `data/league.db` with manager names).
 - Debug output is scrubbed (`scrub_text`: crumb/token/session/auth/cookie values,
   emails) and URLs are redacted (`redact_url`: query values removed).
 - Committed fixtures must be trimmed and pseudonymized (team/manager names) — done by `tests/fixtures/yahoo_web/build_fixtures.py`, which refuses to write a fixture if a real name remains.
@@ -99,8 +99,8 @@ LLM
 | 3 | League metadata, settings/scoring, teams, all current rosters, standings → normalized models (+ offline fixture tests) | ✅ Done — `utils/sync_yahoo_league.py` |
 | 4 | Current matchups, free agents/waivers (with pagination) | ✅ Done (FAAB/waiver priority done in 3; add/drop trends deferred) |
 | 5 | Transactions, historical matchups, draft results | ✅ Done (+ FAB offers with losing bids) |
-| 6 | Local persistence (format TBD), snapshots/history, validation, staged commit so failed syncs never replace good data | ⏳ Next — storage decision needed first |
-| 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | Planned |
+| 6 | Local persistence, snapshots/history, validation, staged commit so failed syncs never replace good data | ✅ Done — SQLite `data/league.db` |
+| 7 | `LeagueDataSource` + local implementation wired into existing handlers/tools; new tools (league settings, all rosters, transactions, sync status) | ⏳ Next |
 | 8 | `DATA_SOURCE` switch; `YahooApiSource` built from existing API code | Planned |
 
 ## Milestone 2 results — what Yahoo's league page looks like
@@ -208,6 +208,32 @@ Details:
   detail text) and untested against a real trade.
 - `/f1/<id>/scoreboard` does not exist (404 page).
 - Scrubbing also redacts URL-encoded emails (`%40`) found in Yahoo's account menu.
+
+## Milestone 6 results — SQLite store
+
+`src/storage/`: `schema.py` (migrations; version in `PRAGMA user_version`), `db.py`
+(`connect()`: WAL, foreign keys, busy timeout, auto-migrate; `LEAGUE_DB_PATH` or
+`data/league.db`), `repository.py` (`LeagueStore`).
+
+| Kind | Tables | Behavior |
+|---|---|---|
+| Runs | `sync_runs` | one row per attempt: `committed` or `failed` (+ error), warnings, what was included |
+| Per-run snapshot | `league_state` (settings JSON, player scans), `scoring_rules`, `teams`, `standings`, `rosters` (open slots), `roster_entries`, `available_players` | full set per committed run → history of rosters/standings/FAAB |
+| Merged history | `players`, `matchups`, `transactions` + `transaction_players`, `waiver_claims` + `waiver_bids`, `draft_picks`, `leagues` | upserted by natural key; re-syncs never duplicate |
+| Views | `latest_runs`, `current_teams`, `current_standings`, `current_rosters`, `current_available_players` | "current" = latest committed run per league |
+
+- `save_snapshot` writes a whole sync in one `BEGIN IMMEDIATE … COMMIT`; any error rolls
+  back everything (tested: duplicate roster player → IntegrityError → previous run stays current).
+- `record_failed_sync` logs auth/extraction failures without touching league data.
+- `load_snapshot(league_key, run_id=None)` rebuilds a `LeagueSnapshot` (latest by default).
+- `player_roster_history(player_key)` → team/slot per run (who changed teams, when).
+- `players` keeps one name per player (roster/available lists win over history pages,
+  because DEF labels vary); draft picks keep NFL team/position as of the draft.
+- First live run: ~240 KB for 10 teams, 155 rostered, 184 available, 41 transactions,
+  150 draft picks, 342 known players.
+
+CLI: `sync_yahoo_league.py` saves to the DB by default; `--db PATH`, `--runs` (list syncs),
+`--json` (extra debug JSON). Tests: `tests/unit/test_league_store.py`.
 
 ## Open decisions / questions
 

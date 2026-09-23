@@ -81,7 +81,7 @@ python utils/sync_yahoo_league.py --league-id <id> --no-players          # skip 
 python utils/sync_yahoo_league.py --league-id <id> --no-history          # skip history
 ```
 
-The sync is all-or-nothing for current league state: if any of those pages fails to parse or the result fails validation, nothing is saved. History is best-effort: a failing history part is reported as a warning. Storage is still being designed, so a validated snapshot is currently written as JSON to `.yahoo_browser_debug/snapshots/` for inspection only. Planned next: persistent local storage the MCP tools read from, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
+The sync is all-or-nothing for current league state: if any of those pages fails to parse or the result fails validation, nothing is saved. History is best-effort: a failing history part is reported as a warning. Each successful sync is saved to a local SQLite database, `data/league.db` (gitignored; override with `--db` or `LEAGUE_DB_PATH`), in a single transaction, so a failed sync never replaces the previous good data. Every sync is kept as a run, so roster, standings, and FAAB changes can be compared over time; transactions, FAB bids, draft picks, and matchups are merged without duplicates. `python utils/sync_yahoo_league.py --runs` lists recent syncs, and `--json` also writes a debug JSON snapshot. Planned next: pointing the MCP tools at this database, with a switch back to the official API once approved. See [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN.md) for the plan and decision log.
 
 ## Authentication
 
@@ -156,10 +156,11 @@ fantasy-football-mcp-public/
 │   │   └── yahoo_credentials.py
 │   ├── agents/
 │   ├── extractors/
-│   │   └── yahoo_web/        # Playwright session for browser-backed Yahoo access
+│   │   └── yahoo_web/        # Playwright session, page parsers, league extractor
 │   ├── handlers/
 │   ├── models/
 │   ├── services/
+│   ├── storage/              # SQLite league store (schema, migrations, repository)
 │   └── strategies/
 ├── tests/
 ├── utils/

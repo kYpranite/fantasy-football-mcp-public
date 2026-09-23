@@ -8,8 +8,9 @@ passes validation. History (previous weeks' matchups, transactions, FAB offers w
 losing bids, draft results) is collected too; a history part that fails is reported as
 a warning and does not block the sync.
 
-Storage is not decided yet: for now a validated snapshot is written as JSON to
-.yahoo_browser_debug/snapshots/ (gitignored) for inspection.
+A validated snapshot is saved to the local SQLite database (default data/league.db,
+gitignored; override with --db or LEAGUE_DB_PATH) in a single transaction, so a failed
+sync never replaces the previous good data. Failed attempts are logged in sync_runs.
 
 Usage (PowerShell):
     python utils/sync_yahoo_league.py --league-id 269337
@@ -17,6 +18,8 @@ Usage (PowerShell):
     python utils/sync_yahoo_league.py --league-id 269337 --offense-depth 200
     python utils/sync_yahoo_league.py --league-id 269337 --no-players   # skip available players
     python utils/sync_yahoo_league.py --league-id 269337 --no-history   # skip transactions/draft/past weeks
+    python utils/sync_yahoo_league.py --league-id 269337 --json         # also write a debug JSON snapshot
+    python utils/sync_yahoo_league.py --runs                            # list recent syncs
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,6 +39,9 @@ from src.extractors.yahoo_web.extractor import (  # noqa: E402
     ExtractionError,
     YahooWebExtractor,
 )
+from src.models.league_data import league_key  # noqa: E402
+from src.storage.db import connect, default_db_path  # noqa: E402
+from src.storage.repository import LeagueStore  # noqa: E402
 from src.extractors.yahoo_web.session import (  # noqa: E402
     DEFAULT_DEBUG_DIR,
     AuthRequired,
@@ -98,6 +104,15 @@ def print_summary(snapshot) -> None:
         print(f"  warning: {warning}")
 
 
+def print_runs(store: LeagueStore) -> None:
+    runs = store.list_runs(limit=15)
+    if not runs:
+        print("No syncs recorded yet.")
+    for r in runs:
+        detail = r["error"] if r["status"] == "failed" else f"{len(json.loads(r['warnings_json']))} warnings"
+        print(f"  run {r['run_id']:>4}  {r['finished_at']}  {r['league_key']}  {r['status']:<9}  {detail}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--league-id", default=os.environ.get("YAHOO_LEAGUE_ID"), help="Number from /f1/<id> (or YAHOO_LEAGUE_ID)")
@@ -106,6 +121,9 @@ def main() -> int:
     parser.add_argument("--save-pages", action="store_true", help="Keep scrubbed HTML of every page fetched")
     parser.add_argument("--no-players", action="store_true", help="Skip available players (free agents/waivers)")
     parser.add_argument("--no-history", action="store_true", help="Skip transactions, FAB offers, draft, past weeks")
+    parser.add_argument("--db", type=Path, default=None, help=f"SQLite database path (default {default_db_path()})")
+    parser.add_argument("--json", action="store_true", help="Also write the snapshot as JSON to .yahoo_browser_debug/")
+    parser.add_argument("--runs", action="store_true", help="List recent syncs and exit")
     parser.add_argument(
         "--offense-depth",
         type=int,
@@ -113,11 +131,17 @@ def main() -> int:
         help=f"Available offensive players to collect per view (default {DEFAULT_PLAYER_DEPTH['O']})",
     )
     args = parser.parse_args()
-    if not args.league_id:
-        parser.error("--league-id is required (or set YAHOO_LEAGUE_ID)")
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    db_path = args.db or default_db_path()
+    if args.runs:
+        print(f"Database: {db_path}")
+        print_runs(LeagueStore(connect(db_path)))
+        return 0
+    if not args.league_id:
+        parser.error("--league-id is required (or set YAHOO_LEAGUE_ID)")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pages_dir = DEFAULT_DEBUG_DIR / "pages" / f"league_{args.league_id}_{stamp}"
@@ -125,6 +149,10 @@ def main() -> int:
     def save_page(name: str, html: str) -> None:
         pages_dir.mkdir(parents=True, exist_ok=True)
         (pages_dir / f"{name.replace(' ', '_')}.html").write_text(scrub_text(html), encoding="utf-8")
+
+    store = LeagueStore(connect(db_path))
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    key = league_key(args.league_id)
 
     print(f"Syncing league {args.league_id} from Yahoo web...")
     try:
@@ -137,17 +165,24 @@ def main() -> int:
             depth = None if args.no_players else {**DEFAULT_PLAYER_DEPTH, "O": args.offense_depth}
             snapshot = extractor.extract(player_depth=depth, include_history=not args.no_history)
     except AuthRequired as exc:
+        store.record_failed_sync(key, "yahoo_web", started_at, f"Login required: {exc}")
         print(f"\nLogin required: {exc}")
         return 2
     except ExtractionError as exc:
-        print(f"\nSync FAILED — nothing saved.\n{exc}")
+        store.record_failed_sync(key, "yahoo_web", started_at, str(exc))
+        print(f"\nSync FAILED — previous data kept, nothing new saved.\n{exc}")
         return 1
 
     print_summary(snapshot)
-    out = DEFAULT_DEBUG_DIR / "snapshots" / f"league_{args.league_id}_{stamp}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\nSnapshot (temporary JSON, storage TBD): {out}")
+    run_id = store.save_snapshot(
+        snapshot, started_at=started_at, include_players=not args.no_players, include_history=not args.no_history
+    )
+    print(f"\nSaved as run {run_id} in {db_path}")
+    if args.json:
+        out = DEFAULT_DEBUG_DIR / "snapshots" / f"league_{args.league_id}_{stamp}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Debug JSON snapshot: {out}")
     return 0
 
 
