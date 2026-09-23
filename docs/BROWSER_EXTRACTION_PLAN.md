@@ -193,7 +193,7 @@ Collected by default (`--no-history` skips it). Current full sync: ~50 page load
 |---|---|---|---|
 | Past weeks' matchups | `/f1/<id>/?matchup_week=N&module=matchups&lhst=matchups` (weeks 1..current-1) | `parse_matchups` (same as current week) | "Final results"; `Matchup.winner_team_key` derived from points once final |
 | Transactions | `/f1/<id>/transactions?transactionsfilter=all&count=<offset>` (25/page, all pages) | `parse_transactions` | per player: action (add/drop/trade), Yahoo detail ("Free Agent", "$18 Waiver", "To Waivers"), FAAB bid; acting team; timestamp |
-| FAB offers | `/f1/<id>/transactions?transactionsfilter=faab&count=<offset>` | `parse_waiver_claims` | every processed claim: winning bid, awarded team, **every losing bid with team, amount, reason** ("Lower Offer", "Lower waiver priority") |
+| FAB offers | `/f1/<id>/transactions?transactionsfilter=faab&count=<offset>` | `parse_waiver_claims` | **contested claims only** (≥1 competing bid): winning bid, awarded team, every losing bid with team, amount, reason. Uncontested waiver claims appear only in transactions ("$3 Waiver"), so FAAB spent is computed from transactions |
 | Draft | `/f1/<id>/draftresults` | `parse_draft_results` | 15 "Round N" tables; teams shown by name only → mapped to team keys (unmatched → `team_key=None` + warning) |
 
 Details:

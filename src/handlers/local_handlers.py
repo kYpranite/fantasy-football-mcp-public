@@ -366,9 +366,9 @@ LOCAL_TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         }, "required": ["league_key"]},
     },
     "ff_get_faab_history": {
-        "description": "Processed FAAB waiver claims with EVERY bid (winner and losers, amounts, reasons) plus a "
-                       "per-manager summary (claims won, FAAB spent, bids placed, max bid, FAAB remaining). Use for "
-                       "bid sizing and manager tendencies.",
+        "description": "FAAB activity per manager: waiver adds and FAAB spent (every processed claim), max winning "
+                       "bid, losing bids with amounts/reasons, FAAB remaining; plus contested claims with every bid. "
+                       "Use for bid sizing and manager tendencies.",
         "input_schema": {"type": "object", "properties": {"league_key": _LEAGUE_KEY, "team_key": _TEAM_KEY},
                          "required": ["league_key"]},
     },

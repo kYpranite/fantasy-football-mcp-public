@@ -508,33 +508,51 @@ class LocalLeagueSource:
         return {**self._meta(s), "total_matching": len(rows), "transactions": rows[: max(1, limit)]}
 
     def faab_bids(self, league_key: Optional[str], team_key: Optional[str] = None) -> Dict[str, Any]:
+        """FAAB activity per manager.
+
+        Waiver adds and FAAB spent come from the transaction history ("$N Waiver" adds), which
+        includes every processed claim. Losing bids come from Yahoo's FAB Offers page, which only
+        lists CONTESTED claims (at least one competing bid).
+        """
         s = self.snapshot(league_key)
         names = self._names(s)
         team = self._team_key(s, team_key, default_mine=False) if team_key else None
         claims = [c for c in s.waiver_claims if team is None or any(b.team_key == team for b in c.bids)]
         managers: Dict[str, Dict[str, Any]] = {
-            t.team_key: {"team_name": t.name, "faab_remaining": t.faab_remaining, "claims_won": 0,
-                         "faab_spent_on_wins": 0.0, "bids_placed": 0, "max_bid": None, "bids": []}
+            t.team_key: {"team_name": t.name, "faab_remaining": t.faab_remaining, "waiver_adds": 0,
+                         "faab_spent": 0.0, "max_winning_bid": None, "losing_bids": 0, "max_losing_bid": None,
+                         "waiver_add_history": [], "losing_bid_history": []}
             for t in s.teams
         }
+        for t in s.transactions:
+            m = managers.get(t.team_key)
+            if m is None:
+                continue
+            for p in t.players:
+                if p.action == "add" and p.faab_bid is not None:
+                    m["waiver_adds"] += 1
+                    m["faab_spent"] += p.faab_bid
+                    m["max_winning_bid"] = max(m["max_winning_bid"] or 0, p.faab_bid)
+                    m["waiver_add_history"].append({"player": p.name, "bid": p.faab_bid, "when": t.timestamp})
         for c in s.waiver_claims:
-            for b in c.bids:
+            for b in c.bids[1:]:  # bids[0] is the winner, already counted from transactions
                 m = managers.get(b.team_key)
                 if m is None:
                     continue
-                m["bids_placed"] += 1
-                m["bids"].append({"player": c.name, "bid": b.bid, "result": b.result, "when": c.timestamp})
+                m["losing_bids"] += 1
                 if b.bid is not None:
-                    m["max_bid"] = b.bid if m["max_bid"] is None else max(m["max_bid"], b.bid)
-                if b.result == "won":
-                    m["claims_won"] += 1
-                    m["faab_spent_on_wins"] += b.bid or 0
+                    m["max_losing_bid"] = max(m["max_losing_bid"] or 0, b.bid)
+                m["losing_bid_history"].append({"player": c.name, "bid": b.bid, "reason": b.result,
+                                                "won_by": names.get(c.awarded_team_key),
+                                                "winning_bid": c.winning_bid, "when": c.timestamp})
         return {
             **self._meta(s),
             "waiver_rules": {"type": s.settings.waiver_type, "period": s.settings.waiver_time},
-            "claims": [{**asdict(c), "awarded_team": names.get(c.awarded_team_key),
-                        "bids": [{**asdict(b), "team_name": names.get(b.team_key)} for b in c.bids]}
-                       for c in claims],
+            "note": "waiver_adds/faab_spent include every processed waiver claim (from transactions). "
+                    "contested_claims lists only claims with competing bids (Yahoo's FAB Offers page).",
+            "contested_claims": [{**asdict(c), "awarded_team": names.get(c.awarded_team_key),
+                                  "bids": [{**asdict(b), "team_name": names.get(b.team_key)} for b in c.bids]}
+                                 for c in claims],
             "by_manager": managers if team is None else {team: managers[team]},
         }
 
