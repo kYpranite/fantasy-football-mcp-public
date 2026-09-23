@@ -7,6 +7,7 @@ carry ``synced_at`` so the model can tell how fresh the data is.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import asdict
@@ -429,6 +430,58 @@ class LocalLeagueSource:
             "transactions": self.transactions(s.league.league_key, player=key, limit=100)["transactions"],
             "drafted": next((asdict(d) for d in s.draft_picks if d.player_key == key), None),
         }
+
+    def _all_known_players(self, s: LeagueSnapshot) -> List[Dict[str, Any]]:
+        """Every player the store knows, with ownership (rostered > available > history only)."""
+        names = self._names(s)
+        known: Dict[str, Dict[str, Any]] = {}
+        for roster in s.rosters:
+            for p in roster.players:
+                known[p.player_key] = {**self._player(p), "ownership": "rostered",
+                                       "fantasy_team_key": roster.team_key, "fantasy_team": names.get(roster.team_key)}
+        for p in s.available_players:
+            known.setdefault(p.player_key, {**self._player(p), "ownership": p.availability})
+        for row in self.store.conn.execute("SELECT player_key, name, nfl_team, positions_json FROM players"):
+            known.setdefault(row["player_key"], {
+                "player_key": row["player_key"], "name": row["name"], "nfl_team": row["nfl_team"],
+                "positions": json.loads(row["positions_json"]),
+                "ownership": "unknown (not on a roster; outside the synced available-player lists)",
+            })
+        return list(known.values())
+
+    def player_details(self, league_key: Optional[str], player: str, details_client=None) -> Dict[str, Any]:
+        """League context for one player plus Sleeper game logs, usage, injury, depth chart."""
+        from src.datasource.player_details import PlayerDetailsError, SleeperPlayerDetails
+
+        s = self.snapshot(league_key)
+        query = (player or "").strip()
+        key = query if query.startswith("nfl.p.") else (f"nfl.p.{query}" if query.isdigit() else None)
+        if key is not None:
+            matches = [m for m in self._all_known_players(s) if m["player_key"] == key]
+        else:
+            found = self.search_players(s.league.league_key, query, limit=50)["matches"]
+            exact = [m for m in found if _fold(m["name"]) == _fold(query)]
+            matches = exact or found
+        if not matches:
+            return {**self._meta(s), "status": "error", "error": f"No player matching {player!r} in synced league data"}
+        if len(matches) > 1:
+            return {**self._meta(s), "status": "ambiguous",
+                    "message": "Several players match; call again with a player_key.",
+                    "matches": [{k: m.get(k) for k in ("player_key", "name", "nfl_team", "positions", "ownership",
+                                                       "fantasy_team")} for m in matches[:10]]}
+        league_context = matches[0]
+        positions = league_context.get("positions") or []
+        result = {**self._meta(s), "status": "success", "player_key": league_context["player_key"],
+                  "name": league_context["name"], "league_context": league_context}
+        client = details_client or SleeperPlayerDetails()
+        try:
+            result["sleeper"] = client.details(
+                league_context["player_key"].rsplit(".", 1)[-1], league_context["name"],
+                positions[0] if positions else None, league_context.get("nfl_team"), s.league.season,
+            )
+        except PlayerDetailsError as exc:
+            result["sleeper_error"] = str(exc)
+        return result
 
     # ------------------------------------------------------------------------ history
 
