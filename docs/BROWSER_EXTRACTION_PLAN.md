@@ -24,7 +24,7 @@ Yahoo web extractor        src/extractors/yahoo_web/   — pages, parsers (HTML 
    ▼
 Normalized data model      src/models/                 — Yahoo-API-style keys
    ▼
-Local storage              (format TBD — see Open decisions)
+Local storage              src/storage/  — SQLite (data/league.db)
    ▼
 Data source layer          LeagueDataSource protocol: local store | official Yahoo API
    ▼
@@ -75,7 +75,7 @@ LLM
 | 2026-09-22 | Available players: status `A` (free agents + waivers), groups O/K/DEF, three views merged per player (rest-of-season proj, week proj, season total), sorted by points, depth-limited (O 100, K 25, DEF 50 per view) | Deep waiver-wire players are irrelevant; the limit is recorded per scan (`player_scans`) and surfaced as a warning so it is never mistaken for the full pool |
 | 2026-09-22 | History (past matchups, transactions, FAB offers, draft) never blocks a sync: each failing part becomes a warning; history checks are warnings, not errors | Requirement: history must not block current-state extraction |
 | 2026-09-22 | Join players on `player_key` only, never on names | Yahoo labels the same DEF "Chiefs" or "Kansas City" between page loads |
-| 2026-09-22 | Storage format **undecided** — SQLite explicitly not chosen yet | To be discussed before Milestone 6 |
+| 2026-09-22 | Storage: **SQLite** (`src/storage/`, `data/league.db`), chosen over DuckDB/Postgres | Stdlib, single file; one transaction per sync so failures never replace good data; WAL lets the MCP read while a sync writes. DuckDB is analytics-oriented and awkward with concurrent processes; Postgres needs a server |
 
 ## Security rules
 
@@ -211,7 +211,6 @@ Details:
 
 ## Open decisions / questions
 
-- Local storage format and history model (snapshots vs. change log).
 - Which additional pages hold settings/scoring, rosters, FAAB, transactions, draft
   results — to be confirmed by capturing pages in Milestone 3+.
 - Yahoo ToS discourages automated access: keep syncs manual, own league only,

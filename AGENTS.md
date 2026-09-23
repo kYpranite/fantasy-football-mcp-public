@@ -36,6 +36,9 @@ milestone status: [docs/BROWSER_EXTRACTION_PLAN.md](docs/BROWSER_EXTRACTION_PLAN
 
 - Yahoo page structure lives only in `src/extractors/yahoo_web/parsers.py`; MCP tools
   and handlers must not depend on selectors.
-- Storage format for synced league data is undecided — do not add persistence
-  (SQLite or otherwise) until it is agreed.
+- Synced league data is stored in SQLite (`src/storage/`, default `data/league.db`).
+  Schema changes go in a NEW migration appended to `MIGRATIONS` in
+  `src/storage/schema.py`; never edit an applied migration.
+- A sync is written in one transaction (`LeagueStore.save_snapshot`); a failed sync
+  must never modify previously committed league data.
 - Commands are run on Windows PowerShell; use `curl.exe`, not `curl`.
