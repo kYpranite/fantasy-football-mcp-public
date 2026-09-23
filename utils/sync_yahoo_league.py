@@ -39,6 +39,7 @@ from src.extractors.yahoo_web.extractor import (  # noqa: E402
     ExtractionError,
     YahooWebExtractor,
 )
+from src.datasource.sync_trigger import SyncInProgress, sync_lock  # noqa: E402
 from src.models.league_data import league_key  # noqa: E402
 from src.storage.db import connect, default_db_path  # noqa: E402
 from src.storage.repository import LeagueStore  # noqa: E402
@@ -154,36 +155,46 @@ def main() -> int:
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     key = league_key(args.league_id)
 
-    print(f"Syncing league {args.league_id} from Yahoo web...")
-    try:
-        with browser_context(headless=args.headless) as context:
-            page = context.pages[0] if context.pages else context.new_page()
-            ensure_logged_in(page, league_url(args.league_id), interactive=not args.headless)
-            extractor = YahooWebExtractor(
-                page, args.league_id, delay_s=args.delay, on_page=save_page if args.save_pages else None
-            )
-            depth = None if args.no_players else {**DEFAULT_PLAYER_DEPTH, "O": args.offense_depth}
-            snapshot = extractor.extract(player_depth=depth, include_history=not args.no_history)
-    except AuthRequired as exc:
-        store.record_failed_sync(key, "yahoo_web", started_at, f"Login required: {exc}")
-        print(f"\nLogin required: {exc}")
-        return 2
-    except ExtractionError as exc:
-        store.record_failed_sync(key, "yahoo_web", started_at, str(exc))
-        print(f"\nSync FAILED — previous data kept, nothing new saved.\n{exc}")
-        return 1
+    def run() -> int:
+        print(f"Syncing league {args.league_id} from Yahoo web...")
+        try:
+            with browser_context(headless=args.headless) as context:
+                page = context.pages[0] if context.pages else context.new_page()
+                ensure_logged_in(page, league_url(args.league_id), interactive=not args.headless)
+                extractor = YahooWebExtractor(
+                    page, args.league_id, delay_s=args.delay, on_page=save_page if args.save_pages else None
+                )
+                depth = None if args.no_players else {**DEFAULT_PLAYER_DEPTH, "O": args.offense_depth}
+                snapshot = extractor.extract(player_depth=depth, include_history=not args.no_history)
+        except AuthRequired as exc:
+            store.record_failed_sync(key, "yahoo_web", started_at, f"Login required: {exc}")
+            print(f"\nLogin required: {exc}")
+            return 2
+        except ExtractionError as exc:
+            store.record_failed_sync(key, "yahoo_web", started_at, str(exc))
+            print(f"\nSync FAILED — previous data kept, nothing new saved.\n{exc}")
+            return 1
 
-    print_summary(snapshot)
-    run_id = store.save_snapshot(
-        snapshot, started_at=started_at, include_players=not args.no_players, include_history=not args.no_history
-    )
-    print(f"\nSaved as run {run_id} in {db_path}")
-    if args.json:
-        out = DEFAULT_DEBUG_DIR / "snapshots" / f"league_{args.league_id}_{stamp}.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"Debug JSON snapshot: {out}")
-    return 0
+        print_summary(snapshot)
+        run_id = store.save_snapshot(
+            snapshot, started_at=started_at, include_players=not args.no_players, include_history=not args.no_history
+        )
+        print(f"\nSaved as run {run_id} in {db_path}")
+        if args.json:
+            out = DEFAULT_DEBUG_DIR / "snapshots" / f"league_{args.league_id}_{stamp}.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"Debug JSON snapshot: {out}")
+        return 0
+
+
+    mode = "quick" if args.no_history else "full"
+    try:
+        with sync_lock(args.league_id, mode):
+            return run()
+    except SyncInProgress as exc:
+        print(f"Sync not started: {exc}")
+        return 3
 
 
 if __name__ == "__main__":
