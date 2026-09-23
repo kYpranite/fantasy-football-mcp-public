@@ -156,3 +156,26 @@ def test_sync_lock_token_handoff_and_conflicts(tmp_path, monkeypatch):
     lock.write_text(json.dumps({"token": "old", "started_at": time.time() - 3600}))  # stale → ignored
     with sync_trigger.sync_lock("1", "full", lock_path=lock):
         pass
+
+
+def test_player_details_handler_after_db_used_on_main_thread(tmp_path, details, monkeypatch):
+    """Regression: the handler must not touch SQLite from its worker thread."""
+    pytest.importorskip("aiohttp")
+    import asyncio
+
+    from src.handlers import local_handlers
+
+    db = tmp_path / "league.db"
+    LeagueStore(connect(db)).save_snapshot(build_snapshot())
+    source = LocalLeagueSource(db_path=db)
+    source.standings(LEAGUE_KEY)  # opens the connection on this (main) thread first, like Claude Desktop
+    local_handlers.set_source(source)
+    monkeypatch.setattr("src.datasource.player_details.SleeperPlayerDetails", lambda: details)
+    try:
+        for query in ("caleb williams", "nfl.p.40900"):
+            result = asyncio.run(local_handlers.handle_ff_get_player_details(
+                {"league_key": LEAGUE_KEY, "player": query}))
+            assert result["status"] == "success", result
+            assert result["sleeper"]["profile"]["injury_status"] == "Out"
+    finally:
+        local_handlers.set_source(None)
